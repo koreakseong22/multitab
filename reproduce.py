@@ -3,7 +3,7 @@
 ## Paper info: MultiTab: A Comprehensive Benchmark Suite with Multi-Dimensional Analysis in Tabular Domains
 ## Contact author: Kyungeun Lee (kyungeun.lee@lgresearch.ai)
 
-import optuna, argparse, os, torch, json, joblib, time, datetime, sys, shutil
+import optuna, argparse, os, torch, json, joblib, time, datetime, sys, shutil, pickle
 from libs.data import TabularDataset
 from libs.model import *
 from libs.eval import *
@@ -12,7 +12,8 @@ import pandas as pd
 import warnings
 warnings.filterwarnings('ignore', category=FutureWarning)
 warnings.filterwarnings('ignore', category=UserWarning)
-
+import os
+token = os.getenv("HF_TOKEN")
 def is_study_todo(study, tasktype, optimal_value=1.0, num_trials=100):
     # Check if the study reached the optimal goal set in the callback
     if tasktype != "regression":
@@ -34,8 +35,10 @@ errors = pd.DataFrame(columns=("seed", "data", "model"))
 i = 0
 with open(error_fname, "r") as file:
     for line in file:
-        l = line.split("optim_logs/")[-1]
-        seed = l.split("seed=")[-1].split("/")[0]
+        # l = line.split("optim_logs/")[-1]
+        # seed = l.split("seed=")[-1].split("/")[0]
+        l = line.split(f"optim_logs{os.sep}")[-1]
+        seed = l.split("seed=")[-1].split(os.sep)[0]
         data = l.split("data=")[-1].split("..")[0]
         model = l.split("model=")[-1].split(".pkl")[0]
         errors.loc[i] = [seed, data, model]
@@ -54,16 +57,17 @@ parser.add_argument("--savepath", type=str, default=".", help="path to save the 
 args = parser.parse_args()
 
 # Load dataset information from a JSON file
-with open(f'/home/multitab/dataset_id.json', 'r') as file:
+with open(f'./dataset_id.json', 'r') as file:
     data_info = json.load(file)
 tasktype = data_info.get(str(args.openml_id))['tasktype']
 
-directory = os.path.join(args.savepath, f'reproduce_logs/seed={args.seed}/data={args.openml_id}')
+# directory = os.path.join(args.savepath, f'reproduce_logs/seed={args.seed}/data={args.openml_id}')
+directory = os.path.join(args.savepath, 'reproduce_logs', f'seed={args.seed}', f'data={args.openml_id}')
 if not os.path.exists(directory):
     os.makedirs(directory)
 
 models = ["lr", "randomforest", "xgboost", "catboost", "lightgbm", "mlp", "embedmlp", "mlpplr", "resnet", "ftt", "t2gformer", "saint", "tabpfn"]
-(init_hp, deepens, hyperens)
+# (init_hp, deepens, hyperens)
 opts = [(True, 0, 0), #no HPO
         (False, 0, 0), #tuned
         (False, 1, 0), (False, 2, 0), (False, 3, 0), (False, 4, 0), #deep ensemble
@@ -74,9 +78,10 @@ opt_dict = {"lr": [opts[0]], "tabpfn": [opts[0]],
 
 # Set GPU environment variables
 os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
-torch.cuda.set_device(args.gpu_id)
+# torch.cuda.set_device(args.gpu_id)
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-env_info = '{0}:{1}'.format(os.uname().nodename, args.gpu_id)
+import platform
+env_info = '{0}:{1}'.format(platform.node(), args.gpu_id)
 
 # Load dataset with specified preprocessing
 dataset = TabularDataset(args.openml_id, tasktype, device=device, seed=args.seed)
@@ -99,10 +104,12 @@ for m in models:
                 np.save(fname, "ValueError: Not implemented.")
                 sys.exit()
             
+            params = {}
             if m not in ["tabpfn", "lr"]:
                 # Load the optimization logs
                 try:
-                    opt_logs = joblib.load(os.path.join(args.savepath, f'optim_logs/seed={args.seed}/data={args.openml_id}..model={m}.pkl'))
+                    # opt_logs = joblib.load(os.path.join(args.savepath, f'optim_logs/seed={args.seed}/data={args.openml_id}..model={m}.pkl'))
+                    opt_logs = joblib.load(os.path.join(args.savepath, 'optim_logs', f'seed={args.seed}', f'data={args.openml_id}..model={m}.pkl'))
                     not_complete = is_study_todo(opt_logs, tasktype)
                     assert not_complete == False
                 except FileNotFoundError:

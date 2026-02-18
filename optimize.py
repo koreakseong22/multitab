@@ -12,7 +12,6 @@ import warnings
 warnings.filterwarnings('ignore', category=FutureWarning)
 warnings.filterwarnings('ignore', category=UserWarning)
 
-os.chdir("/home/multitab")
 # Initialize argument parser
 parser = argparse.ArgumentParser()
 
@@ -60,9 +59,11 @@ remaining_trials = max(0, 100 - completed_trials_count)
 # Main part starts here:
 if train:
     # Set GPU environment variable
-    torch.cuda.set_device(args.gpu_id)
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    env_info = '{0}:{1}'.format(os.uname().nodename, args.gpu_id)
+    # torch.cuda.set_device(args.gpu_id)
+    # device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = torch.device(f'cuda:{args.gpu_id}' if torch.cuda.is_available() else 'cpu')
+    import platform
+    env_info = '{0}:{1}'.format(platform.node(), args.gpu_id)
     print(env_info, device)
     
     # Load dataset

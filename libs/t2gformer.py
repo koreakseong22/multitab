@@ -353,49 +353,70 @@ class t2gformer(torch.nn.Module):
             layer = typing.cast(ty.Dict[str, torch.nn.Module], layer)
             layer['attention'].frozen = True
 
+# class build_t2g(t2gformer):
+#     def __init__(self, params, num_cols=[], categories=[], input_dim=0, output_dim=0, device='cuda'):
+#         super().__init__(num_cols, categories, params["token_bias"], params["n_layers"], params["d_token"] * params["n_heads"], 
+#                          params["n_heads"], params["d_ffn_factor"], params["attention_dropout"], params["ffn_dropout"], params["residual_dropout"], 
+#                          params["activation"], params["prenormalization"], params["initialization"],
+#                          params["kv_compression"], params["kv_compression_sharing"], output_dim)
+        
+#         self.model = t2gformer(num_cols, categories, params["token_bias"], params["n_layers"], params["d_token"] * params["n_heads"], 
+#                                params["n_heads"], params["d_ffn_factor"], params["attention_dropout"], params["ffn_dropout"], params["residual_dropout"], 
+#                                params["activation"], params["prenormalization"], params["initialization"],
+#                                params["kv_compression"], params["kv_compression_sharing"], output_dim)
+        
+#         self.optimizer = params["optimizer"]
+#         self.learning_rate = params["learning_rate"]
+#         self.learning_rate_embed = params["learning_rate_embed"]
+#         self.weight_decay = params["weight_decay"]
 class build_t2g(t2gformer):
     def __init__(self, params, num_cols=[], categories=[], input_dim=0, output_dim=0, device='cuda'):
-        super().__init__(num_cols, categories, params["token_bias"], params["n_layers"], params["d_token"] * params["n_heads"], 
-                         params["n_heads"], params["d_ffn_factor"], params["attention_dropout"], params["ffn_dropout"], params["residual_dropout"], 
-                         params["activation"], params["prenormalization"], params["initialization"],
-                         params["kv_compression"], params["kv_compression_sharing"], output_dim)
+        # 1. 파라미터 안전 추출
+        token_bias = params.get("token_bias", True)
+        d_token_total = params["d_token"] * params["n_heads"]
+
+        # 2. 부모 클래스 초기화 (build_t2g 자체가 t2gformer가 됨)
+        super().__init__(
+            num_cols, categories, token_bias,
+            params["n_layers"], d_token_total, params["n_heads"],
+            params["d_ffn_factor"], params["attention_dropout"], params["ffn_dropout"], 
+            params["residual_dropout"], params["activation"], params["prenormalization"], 
+            params["initialization"], params["kv_compression"], params["kv_compression_sharing"], 
+            output_dim
+        )
         
-        self.model = t2gformer(num_cols, categories, params["token_bias"], params["n_layers"], params["d_token"] * params["n_heads"], 
-                               params["n_heads"], params["d_ffn_factor"], params["attention_dropout"], params["ffn_dropout"], params["residual_dropout"], 
-                               params["activation"], params["prenormalization"], params["initialization"],
-                               params["kv_compression"], params["kv_compression_sharing"], output_dim)
-        
-        self.optimizer = params["optimizer"]
+        # [핵심] self.model = self 를 절대 하지 마세요! (RecursionError의 원인)
+        # 만약 외부에서 .model 속성을 찾는다면 아래처럼 설정 (하지만 self를 대입하면 안 됨)
+        self.optimizer_name = params["optimizer"]
         self.learning_rate = params["learning_rate"]
-        self.learning_rate_embed = params["learning_rate_embed"]
+        self.learning_rate_embed = params.get("learning_rate_embed", self.learning_rate)
         self.weight_decay = params["weight_decay"]
         
     def forward(self, x, cat_features=[]):
-        return self.model(x)
-    
+        # 부모의 forward를 그대로 사용
+        return super().forward(x, cat_features)
+
     def make_optimizer(self):
+        # 상속받은 본인의 파라미터를 직접 사용
         def needs_wd(name):
             return all(x not in name for x in ['tokenizer', '.norm', '.bias'])
         def needs_small_lr(name):
             return any(x in name for x in ['.col_head', '.col_tail'])
         
-        for x in ['tokenizer', '.norm', '.bias']:
-            assert any(x in a for a in (b[0] for b in self.model.named_parameters()))
-        parameters_with_wd = [v for k, v in self.model.named_parameters() if needs_wd(k) and not needs_small_lr(k)]
-        parameters_with_slr = [v for k, v in self.model.named_parameters() if needs_small_lr(k)]
-        parameters_without_wd = [v for k, v in self.model.named_parameters() if not needs_wd(k)]
+        parameters_with_wd = [v for k, v in self.named_parameters() if needs_wd(k) and not needs_small_lr(k)]
+        parameters_with_slr = [v for k, v in self.named_parameters() if needs_small_lr(k)]
+        parameters_without_wd = [v for k, v in self.named_parameters() if not needs_wd(k)]
         
-        parameter_groups = ([{'params': parameters_with_wd}, 
-                             {'params': parameters_without_wd, 'weight_decay': 0.0}, 
-                             {'params': parameters_with_slr, 'lr': self.learning_rate_embed, 'weight_decay': 0.0}])
+        parameter_groups = [
+            {'params': parameters_with_wd}, 
+            {'params': parameters_without_wd, 'weight_decay': 0.0}, 
+            {'params': parameters_with_slr, 'lr': self.learning_rate_embed, 'weight_decay': 0.0}
+        ]
         
-        if self.optimizer == "AdamW":
+        if self.optimizer_name == "AdamW":
             return torch.optim.AdamW(parameter_groups, lr=self.learning_rate, weight_decay=self.weight_decay)
-        elif self.optimizer == "Adam":
-            return torch.optim.Adam(parameter_groups, lr=self.learning_rate, weight_decay=self.weight_decay)
-        elif self.optimizer == "sgd":
-            return torch.optim.SGD(parameter_groups, lr=self.learning_rate, weight_decay=self.weight_decay, momentum=0.9)
-            
+        return torch.optim.Adam(parameter_groups, lr=self.learning_rate)
+               
 class T2GFormer(supmodel):
     def __init__(self, params, tasktype, num_cols=[], cat_features=[], input_dim=0, output_dim=0, device="cuda", data_id=None, modelname="t2g"):
         

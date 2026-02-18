@@ -52,9 +52,24 @@ def calculate_metric(y_true, y_pred, y_prob, tasktype, datatype, prob=False):
     elif tasktype == "multiclass":
         if not prob:
             y_prob = softmax(y_prob, axis=1)
-        y_true_classes = np.argmax(y_true, axis=1) if len(y_pred.shape) == 1 else y_true
-        return {f'acc_{datatype}': calculate_accuracy(y_true_classes, y_pred), f'auroc_{datatype}': calculate_multi_auroc(y_true, y_prob), 
-                f'f1_{datatype}': calculate_f1_score(y_true_classes, y_pred, average='weighted'), f'logloss_{datatype}': calculate_log_loss(y_true, y_prob)}
+        
+        # [수정 포인트] 정답(y_true)과 예측값(y_pred)을 모두 1차원 클래스 라벨 형식으로 통일합니다.
+        # ndim > 1인 경우(즉, 2D 원-핫 형태인 경우)에만 argmax를 취합니다.
+        y_true_labels = np.argmax(y_true, axis=1) if y_true.ndim > 1 else y_true
+        y_pred_labels = np.argmax(y_pred, axis=1) if y_pred.ndim > 1 else y_pred
+        
+        return {
+            f'acc_{datatype}': calculate_accuracy(y_true_labels, y_pred_labels), 
+            f'auroc_{datatype}': calculate_multi_auroc(y_true, y_prob), 
+            f'f1_{datatype}': calculate_f1_score(y_true_labels, y_pred_labels, average='weighted'), 
+            f'logloss_{datatype}': calculate_log_loss(y_true, y_prob)
+        }
+    # elif tasktype == "multiclass":
+    #     if not prob:
+    #         y_prob = softmax(y_prob, axis=1)
+    #     y_true_classes = np.argmax(y_true, axis=1) if len(y_pred.shape) == 1 else y_true
+    #     return {f'acc_{datatype}': calculate_accuracy(y_true_classes, y_pred), f'auroc_{datatype}': calculate_multi_auroc(y_true, y_prob), 
+    #             f'f1_{datatype}': calculate_f1_score(y_true_classes, y_pred, average='weighted'), f'logloss_{datatype}': calculate_log_loss(y_true, y_prob)}
 
 def save_fig(study, savepath):
     fig1 = optuna.visualization.plot_optimization_history(study)

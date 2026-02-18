@@ -219,6 +219,74 @@ def get_search_space(trial, modelname, num_features=None, data_id=None):
     return params
 
 
+def add_default_params(modelname, params, data_id):
+    """
+    이미 정의된 data_id 체계를 활용하여 기본 파라미터를 동적으로 추가합니다.
+    """
+    if modelname == "xgboost":
+        params.update({
+            'n_estimators': 10000,
+            'early_stopping_rounds': 20,
+            'verbosity': 0
+        })
+    elif modelname == "lightgbm":
+        params.update({
+            'iterations': 10000,
+            'early_stopping_rounds': 20,
+            'verbosity': -1
+        })
+    elif modelname in ["mlp", "resnet", "ftt", "embedmlp", "mlpplr", "saint", "t2gformer"]:
+        # 데이터 크기에 따라 학습 횟수를 조절하는 소프트코딩
+        params.update({
+            'n_epochs': 50 if data_id in large_datalist else 100,
+            'early_stopping_rounds': 20
+        })
+    return params
+
+
+def rearrange_params(modelname, data_id, params):
+    """
+    Optuna 로그에 누락된 고정 파라미터들을 데이터 ID에 맞춰 복원합니다.
+    """
+    # 1. FT-Transformer & T2G-Former 보정
+    if modelname in ['ftt', 't2gformer']:
+        params.setdefault('kv_compression', None)
+        params.setdefault('kv_compression_sharing', None)
+        params.setdefault('n_heads', 8)
+
+    # 2. SAINT 모델 보정 (사용자님의 로직 반영)
+    elif modelname == "saint":
+        # large_datalist는 search_space.py 상단에 이미 정의되어 있어야 합니다.
+        if 'depth' not in params:
+            params['depth'] = 3 if data_id in large_datalist else 6
+        if 'heads' not in params:
+            params['heads'] = 4 if data_id in large_datalist else 8
+        if 'hidden' not in params:
+            params['hidden'] = 16
+        if 'cont_embeddings' not in params:
+            params['cont_embeddings'] = 'MLP'
+        if 'attentiontype' not in params:
+            params['attentiontype'] = 'colrow'
+        
+        # 특정 ID에 대한 임베딩 차원 보정
+        if data_id in [5, 1486, 1501, 20, 12, 41143, 44061, 1476, 41702, 41145, 41147, 422]:
+            params.setdefault("embedding_dim", 8)
+        else:
+            params.setdefault("embedding_dim", 32) # 기본값 보장
+
+    # 3. TabR & ModernNCA 보정 (d_multiplier 등 고정값)
+    elif modelname == "tabr":
+        params.setdefault("model", {})
+        if isinstance(params["model"], dict):
+            params["model"].setdefault("d_multiplier", 2.0)
+            params["model"].setdefault("mixer_normalization", "auto")
+            params["model"].setdefault("dropout1", 0.0)
+            params["model"].setdefault("normalization", "LayerNorm")
+            params["model"].setdefault("activation", "ReLU")
+
+    return params
+
+
 def suggest_initial_trial(modelname):
     init_values = {
         "randomforest": {}, # TabRepo

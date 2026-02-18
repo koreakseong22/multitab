@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-import os, json, sys
+import os, json, sys, argparse
 from libs.data import TabularDataset
 from libs.eval import calculate_metric
 from scipy.special import expit, softmax
@@ -9,17 +9,35 @@ import warnings
 warnings.filterwarnings('ignore', category=FutureWarning)
 warnings.filterwarnings('ignore', category=UserWarning)
 
+parser = argparse.ArgumentParser()
+parser.add_argument('--gpu_id', type=int, default=0)
+parser.add_argument('--openml_id', type=str, default="43986") # 기본값 Wine Quality
+parser.add_argument('--seed', type=int, default=1)
+parser.add_argument('--savepath', type=str, default='results')
+args = parser.parse_args()
+
+basepath = args.savepath  # 모든 결과가 저장된 results 폴더
+gpu_id = args.gpu_id
+target_data_id = args.openml_id
+target_seed = args.seed
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+if torch.cuda.is_available():
+    torch.cuda.set_device(gpu_id)
+
+# opts = {
+#     "deep": ["deep=0..hyper=0", "deep=1..hyper=0", "deep=2..hyper=0", "deep=3..hyper=0", "deep=4..hyper=0"],
+#     "hyper": ["deep=0..hyper=0", "deep=0..hyper=1", "deep=0..hyper=2", "deep=0..hyper=3", "deep=0..hyper=4"],
+#     "all": ["deep=0..hyper=0", "deep=1..hyper=0", "deep=2..hyper=0", "deep=3..hyper=0", "deep=4..hyper=0", "deep=0..hyper=1", "deep=0..hyper=2", "deep=0..hyper=3", "deep=0..hyper=4"]
+# }
 opts = {
-    "deep": ["deep=0..hyper=0", "deep=1..hyper=0", "deep=2..hyper=0", "deep=3..hyper=0", "deep=4..hyper=0"],
-    "hyper": ["deep=0..hyper=0", "deep=0..hyper=1", "deep=0..hyper=2", "deep=0..hyper=3", "deep=0..hyper=4"],
-    "all": ["deep=0..hyper=0", "deep=1..hyper=0", "deep=2..hyper=0", "deep=3..hyper=0", "deep=4..hyper=0", "deep=0..hyper=1", "deep=0..hyper=2", "deep=0..hyper=3", "deep=0..hyper=4"]
+    "deep": [f"deep={i}..hyper=0" for i in range(5)],
+    "hyper": [f"deep=0..hyper={i}" for i in range(5)],
+    "all": [f"deep={i}..hyper=0" for i in range(5)] + [f"deep=0..hyper={i}" for i in range(1, 5)]
 }
 
-basepath = '.'
-gpu_id = 0
-
-def get_results(result_fname, dataset, tasktype, seed, data_id, model, ensemble_type="deep"):
-    
+def get_results(result_fname, dataset, tasktype, seed, data_id, model_name, ensemble_type="deep"):
+    result_path = os.path.join(basepath, result_fname)
     try:
         result = pd.read_csv(result_fname, index_col=0)
     except FileNotFoundError:
@@ -29,20 +47,26 @@ def get_results(result_fname, dataset, tasktype, seed, data_id, model, ensemble_
         n_models = [9] 
     else:
         n_models = [2, 3, 4, 5] 
+
     for e in n_models:
         row = len(result)
-        
         (X_train, y_train), (X_val, y_val), (X_test, y_test) = dataset._indv_dataset()
         y_std = dataset.y_std
         preds = []
+
         for i in range(e):
-            fname = f'{basepath}/reproduce_logs/seed={seed}/data={data_id}/model={modelname}..init_hps=False..{opts[ensemble_type][i]}.npy'
-            f = np.load(fname, allow_pickle=True).item()
-            if not isinstance(f, str):
-                if tasktype == "regression":
-                    preds.append(f["Prediction"])
-                else:
-                    preds.append(f["Probability"])
+            fname = os.path.join(basepath, 'reproduce_logs', f'seed={seed}', f'data={data_id}', 
+                                 f'model={model_name}..init_hps=False..{opts[ensemble_type][i]}.npy')
+            if os.path.exists(fname):
+                f = np.load(fname, allow_pickle=True).item()
+                if not isinstance(f, str):
+                    if tasktype == "regression":
+                        preds.append(f["Prediction"])
+                    else:
+                        preds.append(f["Probability"])
+            else:
+                print(f"⚠️ 파일 없음: {fname}")
+        if not preds: continue
 
         while len(preds) < e and len(preds) > 0:
             preds.append(preds[-1])
@@ -55,14 +79,14 @@ def get_results(result_fname, dataset, tasktype, seed, data_id, model, ensemble_
             y_test = y_test*y_std
             preds = preds*y_std
             pred_classes = preds
-        elif (tasktype == "binclass") & (model in ["modernnca"]):
+        elif (tasktype == "binclass") & (model_name in ["modernnca"]):
             assert preds.min() >= 0
             assert preds.max() <= 1
             pred_classes = np.round(preds)
         elif (tasktype == "binclass"):
             preds = expit(preds)
             pred_classes = np.round(preds)
-        else:
+        else: # multi-class classification
             preds = softmax(preds, axis=1)
             pred_classes = np.argmax(preds, axis=1)
 
@@ -73,73 +97,125 @@ def get_results(result_fname, dataset, tasktype, seed, data_id, model, ensemble_
 
         print(perf)
         
-        if ensemble_type == "deep":
-            if tasktype == "regression":
-                result.loc[row] = [data_id, tasktype, modelname, seed, e, 0,
-                                   perf.get("rmse_test", None), perf.get("rmse_test", None), perf.get("rmse_test", None), False]
-            else:
-                result.loc[row] = [data_id, tasktype, modelname, seed, e, 0,
-                                   perf.get("acc_test", None), perf.get("auroc_test", None), perf.get("logloss_test", None), False]
-        elif ensemble_type == "hyper":
-            if tasktype == "regression":
-                result.loc[row] = [data_id, tasktype, modelname, seed, 0, e,
-                                   perf.get("rmse_test", None), perf.get("rmse_test", None), perf.get("rmse_test", None), False]
-            else:
-                result.loc[row] = [data_id, tasktype, modelname, seed, 0, e,
-                                   perf.get("acc_test", None), perf.get("auroc_test", None), perf.get("logloss_test", None), False]
-        else:
-            if tasktype == "regression":
-                result.loc[row] = [data_id, tasktype, modelname, seed, 5, 5,
-                                   perf.get("rmse_test", None), perf.get("rmse_test", None), perf.get("rmse_test", None), False]
-            else:
-                result.loc[row] = [data_id, tasktype, modelname, seed, 5, 5,
-                                   perf.get("acc_test", None), perf.get("auroc_test", None), perf.get("logloss_test", None), False]
+        # 결과 데이터프레임 업데이트
+        res_row = [data_id, tasktype, model_name, seed, 
+                   (e if ensemble_type in ["deep", "all"] else 0),
+                   (e if ensemble_type == "hyper" else (5 if ensemble_type == "all" else 0)),
+                   perf.get("acc_test" if tasktype != "regression" else "rmse_test"),
+                   perf.get("auroc_test" if tasktype != "regression" else "rmse_test"),
+                   perf.get("logloss_test" if tasktype != "regression" else "rmse_test"),
+                   False]
+        result.loc[row] = res_row
         
-        # print(result.loc[row].values)
-        print(result.tail(1))
+        # 저장 및 로그
+        result.to_csv(result_path)
+        log_dir = os.path.join(basepath, 'ensemble_logs', f'seed={seed}', f'data={data_id}')
+        if not os.path.exists(log_dir): os.makedirs(log_dir)
         
-        result.to_csv(result_fname)
-        if ensemble_type == "deep":
-            np.save(
-                f'{basepath}/ensemble_logs/seed={seed}/data={data_id}/model={modelname}..init_hps=False..deep={e}..hyper=0.npy',
-            preds)
-        elif ensemble_type == "hyper":
-            np.save(
-                f'{basepath}/ensemble_logs/seed={seed}/data={data_id}/model={modelname}..init_hps=False..deep=0..hyper={e}.npy',
-            preds)
-        else:
-            np.save(
-                f'{basepath}/ensemble_logs/seed={seed}/data={data_id}/model={modelname}..init_hps=False..deep=5..hyper=5.npy',
-            preds)
+        save_name = f'model={model_name}..init_hps=False..{ensemble_type}={e}.npy'
+        np.save(os.path.join(log_dir, save_name), preds)
+        print(f"✅ {model_name} {ensemble_type} Ensemble (n={e}) 완료. Acc: {perf.get('acc_test'):.4f}")
+
+        # if ensemble_type == "deep":
+        #     if tasktype == "regression":
+        #         result.loc[row] = [data_id, tasktype, modelname, seed, e, 0,
+        #                            perf.get("rmse_test", None), perf.get("rmse_test", None), perf.get("rmse_test", None), False]
+        #     else:
+        #         result.loc[row] = [data_id, tasktype, modelname, seed, e, 0,
+        #                            perf.get("acc_test", None), perf.get("auroc_test", None), perf.get("logloss_test", None), False]
+        # elif ensemble_type == "hyper":
+        #     if tasktype == "regression":
+        #         result.loc[row] = [data_id, tasktype, modelname, seed, 0, e,
+        #                            perf.get("rmse_test", None), perf.get("rmse_test", None), perf.get("rmse_test", None), False]
+        #     else:
+        #         result.loc[row] = [data_id, tasktype, modelname, seed, 0, e,
+        #                            perf.get("acc_test", None), perf.get("auroc_test", None), perf.get("logloss_test", None), False]
+        # else:
+        #     if tasktype == "regression":
+        #         result.loc[row] = [data_id, tasktype, modelname, seed, 5, 5,
+        #                            perf.get("rmse_test", None), perf.get("rmse_test", None), perf.get("rmse_test", None), False]
+        #     else:
+        #         result.loc[row] = [data_id, tasktype, modelname, seed, 5, 5,
+        #                            perf.get("acc_test", None), perf.get("auroc_test", None), perf.get("logloss_test", None), False]
+        
+        # # print(result.loc[row].values)
+        # print(result.tail(1))
+        
+        # result.to_csv(result_fname)
+        # if ensemble_type == "deep":
+        #     np.save(
+        #         f'{basepath}/ensemble_logs/seed={seed}/data={data_id}/model={modelname}..init_hps=False..deep={e}..hyper=0.npy',
+        #     preds)
+        # elif ensemble_type == "hyper":
+        #     np.save(
+        #         f'{basepath}/ensemble_logs/seed={seed}/data={data_id}/model={modelname}..init_hps=False..deep=0..hyper={e}.npy',
+        #     preds)
+        # else:
+        #     np.save(
+        #         f'{basepath}/ensemble_logs/seed={seed}/data={data_id}/model={modelname}..init_hps=False..deep=5..hyper=5.npy',
+        #     preds)
+
 
 torch.cuda.set_device(gpu_id)
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-with open(f'dataset_id.json', 'r') as file:
+
+# with open(f'dataset_id.json', 'r') as file:
+#     data_info = json.load(file)
+
+# pd.set_option("display.float_format", "{:.3f}".format)
+# result_fname = "ensemble_results.csv"
+# # result_fname = f"ensemble_results_logloss.csv"
+# models = ["mlp", "embedmlp", "mlpplr", "ftt", "resnet", "t2gformer", "saint", "tabr", "modernnca"]
+# # datalist = "25 461 210 466 42665 444 497 10 1099 48 338 40916 23381 4153 505 560 51 566 452 53 524 49 194 42370 511 509 456 8 337 59 35 42360 455 475 40496 531 1063 703 534 1467 44968 42 1510 334 549 11 188 29 470 43611 40981 45102 1464 1549 37 43962 469 458 54 45545 50 307 1555 31 1494 4544 41702 934 1479 41021 41265 185 454 1462 43466 23 43919 42931 1501 1493 1492 1504 315 20 12 14 16 22 18 1067 1466 36 1487 44091 42727 43926 41143 507 46 3 44055 44061 1043 44160 44158 40900 44124 1489 1497 40499 24 41145 1475 182 44136 43986 503 372 44157 558 44132 562 189 40536 44056 422 44054 4538 45062 44145 44122 1531 1459 44126 44062 42183 32 4534 42734 44125 44123 44137 1476 44005 1471 44133 846 44134 44162 44089 44063 44026 45012 6 44090 537 999999 44148 44066 44984 4135 1486 45714 44064 344 41027 151 44963 40985 45068 44059 44131 40685 45548 41169 41162 42345 41168 40922 23512 40672 44161 41150 1509 44057 43928 44069 1503 44068 44159 1113 1169 150 44065 44129 1567"
+# # data_ids = datalist.split(" ")
+# data_ids = [target_data_id]
+# large_set = "44059 44131 40685 45548 41169 41162 42345 41168 40922 23512 40672 44161 41150 1509 44057 43928 44069 1503 44068 44159 1113 44027 1169 150 44065 44129 1567"
+# large_set = large_set.split(" ")
+
+# for data_id in data_ids:
+#     tasktype = data_info[data_id]["tasktype"]
+#     seeds = 3 if data_id in large_set else 10
+#     for seed in range(seeds):
+#         print("==================", data_id, seed, "==================")
+#         dataset = TabularDataset(eval(data_id), tasktype, device=device, seed=seed)
+#         if not os.path.exists(f"/home/lab-di/squads/supertab/multitab/_results_final/ensemble_logs/seed={seed}/data={data_id}"):
+#             os.makedirs(f'/home/lab-di/squads/supertab/multitab/_results_final/ensemble_logs/seed={seed}/data={data_id}')
+            
+#         for modelname in models:
+#             get_results(result_fname, dataset, tasktype=tasktype, seed=seed, data_id=data_id, model=modelname, ensemble_type="deep")
+#             get_results(result_fname, dataset, tasktype=tasktype, seed=seed, data_id=data_id, model=modelname, ensemble_type="hyper")
+#             get_results(result_fname, dataset, tasktype=tasktype, seed=seed, data_id=data_id, model=modelname, ensemble_type="all")
+
+# print(result_fname)
+
+# for data_id in data_ids:
+#     tasktype = data_info[data_id]["tasktype"]
+#     target_seeds = [1] 
+    
+#     for seed in target_seeds:
+#         print(f"\n================== Processing Data:{data_id} Seed:{target_seed} ==================")
+#         dataset = TabularDataset(int(data_id), tasktype, device=device, seed=seed)
+        
+#         for modelname in models:
+#             get_results(result_fname, dataset, tasktype, seed, data_id, modelname, "deep")
+#             get_results(result_fname, dataset, tasktype, seed, data_id, modelname, "hyper")
+#             get_results(result_fname, dataset, tasktype, seed, data_id, modelname, "all")
+
+# print(f"\n✨ 모든 앙상블 과정이 완료되었습니다! 결과 파일: {os.path.join(basepath, result_fname)}")
+
+with open('dataset_id.json', 'r') as file:
     data_info = json.load(file)
 
-pd.set_option("display.float_format", "{:.3f}".format)
+models = ["lr", "randomforest", "xgboost", "catboost", "lightgbm", "mlp", "embedmlp", "mlpplr", "resnet", "ftt", "t2gformer", "saint", "tabpfn"]
+tasktype = data_info[target_data_id]["tasktype"]
 
+print(f"\n🚀 앙상블 프로세스 시작: 데이터 {target_data_id}")
+dataset = TabularDataset(int(target_data_id), tasktype, device=device, seed=target_seed)
 
-result_fname = f"ensemble_results_logloss.csv"
-models = ["mlp", "embedmlp", "mlpplr", "ftt", "resnet", "t2gformer", "saint", "tabr", "modernnca"]
-datalist = "25 461 210 466 42665 444 497 10 1099 48 338 40916 23381 4153 505 560 51 566 452 53 524 49 194 42370 511 509 456 8 337 59 35 42360 455 475 40496 531 1063 703 534 1467 44968 42 1510 334 549 11 188 29 470 43611 40981 45102 1464 1549 37 43962 469 458 54 45545 50 307 1555 31 1494 4544 41702 934 1479 41021 41265 185 454 1462 43466 23 43919 42931 1501 1493 1492 1504 315 20 12 14 16 22 18 1067 1466 36 1487 44091 42727 43926 41143 507 46 3 44055 44061 1043 44160 44158 40900 44124 1489 1497 40499 24 41145 1475 182 44136 43986 503 372 44157 558 44132 562 189 40536 44056 422 44054 4538 45062 44145 44122 1531 1459 44126 44062 42183 32 4534 42734 44125 44123 44137 1476 44005 1471 44133 846 44134 44162 44089 44063 44026 45012 6 44090 537 999999 44148 44066 44984 4135 1486 45714 44064 344 41027 151 44963 40985 45068 44059 44131 40685 45548 41169 41162 42345 41168 40922 23512 40672 44161 41150 1509 44057 43928 44069 1503 44068 44159 1113 1169 150 44065 44129 1567"
-data_ids = datalist.split(" ")
-large_set = "44059 44131 40685 45548 41169 41162 42345 41168 40922 23512 40672 44161 41150 1509 44057 43928 44069 1503 44068 44159 1113 44027 1169 150 44065 44129 1567"
-large_set = large_set.split(" ")
+for m in models:
+    get_results("ensemble_results.csv", dataset, tasktype, target_seed, target_data_id, m, "deep")
+    get_results("ensemble_results.csv", dataset, tasktype, target_seed, target_data_id, m, "hyper")
+    get_results("ensemble_results.csv", dataset, tasktype, target_seed, target_data_id, m, "all")
 
-for data_id in data_ids:
-    tasktype = data_info[data_id]["tasktype"]
-    seeds = 3 if data_id in large_set else 10
-    for seed in range(seeds):
-        print("==================", data_id, seed, "==================")
-        dataset = TabularDataset(eval(data_id), tasktype, device=device, seed=seed)
-        if not os.path.exists(f"/home/lab-di/squads/supertab/multitab/_results_final/ensemble_logs/seed={seed}/data={data_id}"):
-            os.makedirs(f'/home/lab-di/squads/supertab/multitab/_results_final/ensemble_logs/seed={seed}/data={data_id}')
-            
-        for modelname in models:
-            get_results(result_fname, dataset, tasktype=tasktype, seed=seed, data_id=data_id, model=modelname, ensemble_type="deep")
-            get_results(result_fname, dataset, tasktype=tasktype, seed=seed, data_id=data_id, model=modelname, ensemble_type="hyper")
-            get_results(result_fname, dataset, tasktype=tasktype, seed=seed, data_id=data_id, model=modelname, ensemble_type="all")
-
-print(result_fname)
+print(f"\n✨ 작업 완료! 결과 파일: {os.path.join(basepath, 'ensemble_results.csv')}")

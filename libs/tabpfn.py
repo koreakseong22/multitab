@@ -7,7 +7,8 @@ class tabpfn(torch.nn.Module):
         
         super(tabpfn, self).__init__()
         self.tasktype = tasktype
-        self.model = TabPFNClassifier(device=torch.device("cpu"), N_ensemble_configurations=32)
+        # self.model = TabPFNClassifier(device=torch.device("cpu"), N_ensemble_configurations=32)
+        self.model = TabPFNClassifier(device=torch.device("cpu"))
     
     def fit(self, X_train, y_train, X_val, y_val):
         if self.tasktype == "multiclass":

@@ -1,6 +1,8 @@
+# [Python 관련]
 __pycache__/
-*.pyc
-
+*.py[cod]
+*$py.class
+venv/
 .env
 
 tmp
@@ -10,3 +12,9 @@ libs/.ipynb_checkpoints/
 catboost/
 catboost_info/
 results/
+.vscode/
+.idea/
+
+optim_logs/
+*.pkl
+*.csv

@@ -197,18 +197,37 @@ class TabR(nn.Module):
         self.cached_candidate_k = None
         self.cached_candidate_y = None
 
+    # def update_index(self):
+    #     """Update FAISS search index once per epoch."""
+    #     if self.cached_candidate_k is None or self.cached_candidate_y is None:
+    #         return
+    #     d_main = self.cached_candidate_k.shape[1]
+    #     if self.search_index is None:
+    #         res = faiss.StandardGpuResources()
+    #         cfg = faiss.GpuIndexFlatConfig()
+    #         cfg.device = torch.cuda.current_device()
+    #         self.search_index = faiss.GpuIndexFlatL2(res, d_main, cfg)
+    #     self.search_index.reset()
+    #     self.search_index.add(self.cached_candidate_k.to(torch.float32).detach().cpu().numpy())
     def update_index(self):
-        """Update FAISS search index once per epoch."""
-        if self.cached_candidate_k is None or self.cached_candidate_y is None:
-            return
+        if self.cached_candidate_k is None: return
         d_main = self.cached_candidate_k.shape[1]
+    
+        # 1. CPU 인덱스를 cpu_index라는 이름으로 생성
+        cpu_index = faiss.IndexFlatL2(d_main)
+        data = self.cached_candidate_k.to(torch.float32).detach().cpu().numpy()
+
         if self.search_index is None:
-            res = faiss.StandardGpuResources()
-            cfg = faiss.GpuIndexFlatConfig()
-            cfg.device = torch.cuda.current_device()
-            self.search_index = faiss.GpuIndexFlatL2(res, d_main, cfg)
+            try:
+                # GPU 가속 시도
+                res = faiss.StandardGpuResources()
+                self.search_index = faiss.index_cpu_to_gpu(res, torch.cuda.current_device(), cpu_index)
+            except:
+                # [수정] 위에서 만든 cpu_index를 안전하게 대입 (index라고 쓰면 안 됨)
+                self.search_index = cpu_index
+        
         self.search_index.reset()
-        self.search_index.add(self.cached_candidate_k.to(torch.float32).detach().cpu().numpy())
+        self.search_index.add(data)
 
     def reset_parameters(self):
         if isinstance(self.label_encoder, nn.Linear):
