@@ -18,3 +18,5 @@ results/
 optim_logs/
 *.pkl
 *.csv
+
+.DS_Store

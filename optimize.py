@@ -23,6 +23,9 @@ parser.add_argument("--modelname", type=str, default="resnet",
                     choices=['randomforest', 'xgboost', 'catboost', 'lightgbm', 'mlp', 'embedmlp', 'mlpplr', 'ftt', 'resnet', 't2gformer', 'saint', 'modernnca', 'tabr']) #lr, tabpfn not here -- only in reproduce.py
 parser.add_argument("--savepath", type=str, default=".", help="path to save the results")
 
+# 추가
+parser.add_argument('--n_trials', type=int, default=100, help='Number of optimization trials')
+parser.add_argument('--metric', type=str, default='l2', choices=['l2', 'l1', 'cosine', 'mahalanobis', 'wasserstein', 'kl'], help='Distance metric for TabR Retriever')
 # Parse the arguments
 args = parser.parse_args()
 
@@ -54,7 +57,9 @@ else:
     train = check_if_fname_exists_in_error(fname)
 
 completed_trials_count = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
-remaining_trials = max(0, 100 - completed_trials_count)
+# remaining_trials = max(0, 100 - completed_trials_count)
+remaining_trials = max(0, args.n_trials - completed_trials_count)
+
 
 # Main part starts here:
 if train:
@@ -76,9 +81,11 @@ if train:
     # Define optimization trials
     def objective(trial):
         print("### Start: ", trial.datetime_start.strftime("%m/%d %H:%M:%S"))
-        params = get_search_space(trial, args.modelname, num_features=X_train.size(1), data_id=args.openml_id)
+        params = get_search_space(trial, args.modelname, num_features=X_train.size(1), data_id=args.openml_id, metric=args.metric)
         
         output_dim = y_train.shape[1] if tasktype == "multiclass" else 1
+
+
         model = getmodel(args.modelname, params, tasktype, dataset, args.openml_id, X_train.shape[1], output_dim, device)
         model.fit(X_train, y_train, X_val, y_val)
         
@@ -123,7 +130,12 @@ if train:
     else:
         study.optimize(objective, n_trials=remaining_trials, callbacks=[stop_when_reached_optimal, lambda study, trial: joblib.dump(study, fname)])
     
-    total_training_time = sum([trial.user_attrs['training_time'] for trial in study.trials])
+    # total_training_time = sum([trial.user_attrs['training_time'] for trial in study.trials])
+    total_training_time = sum([
+    trial.user_attrs.get('training_time', 0) 
+    for trial in study.trials 
+    if trial.state == optuna.trial.TrialState.COMPLETE
+    ])
     study.set_user_attr('total_training_time', total_training_time)
     
     # Save optimization history

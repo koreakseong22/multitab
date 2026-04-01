@@ -19,6 +19,44 @@ from tqdm import tqdm
 from libs.data import get_batch_size
 from libs.supervised import CallbackContainer, EarlyStopping, CosineAnnealingLR_Warmup
 
+
+# --- 추가: Wasserstein 계산을 위한 Sinkhorn 알고리즘 (Simplified) ---
+def sinkhorn_distance(x, y, eps=0.1, n_iters=5):
+    """
+    x, y: (N, d_main) 형태의 벡터 (N = Batch * Fetch_Size)
+    """
+    # 1. 확률 분포로 변환 및 정규화 (각 샘플의 합이 1이 되도록)
+    mu = F.softplus(x)
+    mu = mu / (mu.sum(dim=-1, keepdim=True) + 1e-8)
+    nu = F.softplus(y)
+    nu = nu / (nu.sum(dim=-1, keepdim=True) + 1e-8)
+
+    # 2. 비용 행렬 C와 커널 행렬 K 생성 (d_main x d_main)
+    d = mu.shape[-1]
+    indices = torch.arange(d, device=mu.device).float()
+    C = torch.abs(indices.unsqueeze(0) - indices.unsqueeze(1)) # (D, D)
+    K = torch.exp(-C / eps) # (D, D)
+    
+    # 3. Sinkhorn Iterations
+    u = torch.ones_like(mu) # (N, D)
+    
+    for _ in range(n_iters):
+        # v = nu / (u @ K)
+        v = nu / (torch.matmul(u, K) + 1e-8) # (N, D)
+        # u = mu / (v @ K.T)
+        u = mu / (torch.matmul(v, K.t()) + 1e-8) # (N, D)
+        
+    # 4. [수정된 부분] 최종 거리 계산 (N, D) -> (N,)
+    # Transport Plan P = diag(u) @ K @ diag(v)
+    # Cost = Tr(P.T @ C) = sum(u * ((K * C) @ v.T).T)
+    K_C = K * C # Kernel과 Cost의 요소별 곱 (D, D)
+    
+    # u와 (v @ K_C.T)를 행렬곱 연산으로 처리하여 차원 불일치 해결
+    dist = torch.sum(u * torch.matmul(v, K_C.t()), dim=-1)
+    
+    return dist
+
+
 class Averager():
     """
     A simple averager.
@@ -53,6 +91,37 @@ class PeriodicEmbeddings(nn.Module):
         x = 2 * torch.pi * self.frequencies[None] * x[..., None]
         x = torch.cat([torch.cos(x), torch.sin(x)], -1)
         return x
+
+# --- 추가: Soft Binning Embeddings ---
+class SoftBinningEmbeddings(nn.Module):
+    def __init__(self, n_features: int, n_bins: int, d_embedding: int):
+        super().__init__()
+        self.n_bins = n_bins
+        # 각 피처별로 n_bins개의 중심점을 학습 가능한 파라미터로 설정
+        # 초기값은 -2.0에서 2.0 사이로 균등하게 분포 (데이터가 정규화되었다고 가정)
+        self.centers = Parameter(torch.linspace(-2.0, 2.0, n_bins).repeat(n_features, 1))
+        
+        # 생성된 bin 확률 분포를 모델의 임베딩 차원으로 투영
+        self.projection = nn.Linear(n_bins, d_embedding)
+        self.activation = nn.ReLU()
+
+    def forward(self, x: Tensor) -> Tensor:
+        # x: (Batch, n_features)
+        # 1. 거리 계산: (Batch, n_features, 1) - (1, n_features, n_bins)
+        # -> (Batch, n_features, n_bins)
+        diff = x.unsqueeze(-1) - self.centers.unsqueeze(0)
+        dist = torch.abs(diff)
+        
+        # 2. Soft-assignment: 거리가 가까울수록 높은 확률 (Temperature 0.1 적용)
+        # 이 부분이 '이산화(Binning)'를 미분 가능하게 만드는 핵심입니다.
+        bin_weights = F.softmax(-dist * 10.0, dim=-1) 
+        
+        # 3. 토큰화 완성: 각 피처별로 d_embedding 크기의 벡터 생성
+        # (Batch, n_features, n_bins) -> (Batch, n_features, d_embedding)
+        x = self.projection(bin_weights)
+        x = self.activation(x)
+        return x
+
 
 class PLREmbeddings(nn.Sequential):
     """The PLR embeddings from the paper 'On Embeddings for Numerical Features in Tabular Deep Learning'.
@@ -123,8 +192,19 @@ class TabR(nn.Module):
         activation: str,
         memory_efficient: bool = False,
         candidate_encoding_batch_size: Optional[int] = None,
+        metric: str = 'l2',  # 추가: 'l1', 'cosine', 'mahalanobis', 'wasserstein', 'kl'
+        **kwargs,
     ) -> None:
         super().__init__()
+        self.metric = metric
+
+        # [추가] Mahalanobis를 위한 학습 가능 행렬 (d_main x d_main)
+        if self.metric == 'mahalanobis':
+            self.W = Parameter(torch.eye(d_main))  # 초기값은 단위 행렬로 설정
+        
+        # Gumbel-Softmax를 위한 temperature 파라미터 (학습 가능하게 설정 가능)
+        self.temperature = Parameter(torch.tensor(1.0))  # 초기값은 1.0, 필요에 따라 조정 가능 
+
         if not memory_efficient:
             assert candidate_encoding_batch_size is None
         if mixer_normalization == 'auto':
@@ -135,11 +215,36 @@ class TabR(nn.Module):
             dropout1 = dropout0
         self.n_classes = n_classes
 
-        self.num_embeddings = (
-            None
-            if num_embeddings is None
-            else PLREmbeddings(**num_embeddings, n_features=n_num_features)
-        )
+        # [수정] num_embeddings이 soft_binning인 경우 별도의 SoftBinningEmbeddings 클래스를 사용하도록 분기
+        if num_embeddings is not None:
+            token_type = num_embeddings.get('type')
+            
+            if token_type == 'soft_binning':
+                # Soft-Binning에 필요한 인자만 추출
+                self.num_embeddings = SoftBinningEmbeddings(
+                    n_features=n_num_features,
+                    n_bins=num_embeddings.get('n_bins', 32),
+                    d_embedding=num_embeddings.get('d_embedding', 128)
+                )
+            else:
+                # PLR 방식일 때는 n_bins와 type을 제외한 필요한 인자만 추출하여 전달
+                # PLREmbeddings의 __init__은 n_frequencies, frequency_scale, d_embedding만 받습니다.
+                plr_params = {
+                    'n_frequencies': num_embeddings.get('n_frequencies'),
+                    'frequency_scale': num_embeddings.get('frequency_scale'),
+                    'd_embedding': num_embeddings.get('d_embedding')
+                }
+                # None인 값들은 제외 (기본값 사용 유도)
+                plr_params = {k: v for k, v in plr_params.items() if v is not None}
+                
+                self.num_embeddings = PLREmbeddings(**plr_params, n_features=n_num_features)
+        else:
+            self.num_embeddings = None
+        # self.num_embeddings = (
+        #     None
+        #     if num_embeddings is None
+        #     else PLREmbeddings(**num_embeddings, n_features=n_num_features)
+        # )
 
         self.n_num_features = n_num_features
         d_in = (
@@ -197,37 +302,82 @@ class TabR(nn.Module):
         self.cached_candidate_k = None
         self.cached_candidate_y = None
 
-    # def update_index(self):
-    #     """Update FAISS search index once per epoch."""
-    #     if self.cached_candidate_k is None or self.cached_candidate_y is None:
-    #         return
-    #     d_main = self.cached_candidate_k.shape[1]
-    #     if self.search_index is None:
-    #         res = faiss.StandardGpuResources()
-    #         cfg = faiss.GpuIndexFlatConfig()
-    #         cfg.device = torch.cuda.current_device()
-    #         self.search_index = faiss.GpuIndexFlatL2(res, d_main, cfg)
-    #     self.search_index.reset()
-    #     self.search_index.add(self.cached_candidate_k.to(torch.float32).detach().cpu().numpy())
     def update_index(self):
-        if self.cached_candidate_k is None: return
+        """Update FAISS search index once per epoch."""
+        if self.cached_candidate_k is None or self.cached_candidate_y is None:
+            return
         d_main = self.cached_candidate_k.shape[1]
-    
-        # 1. CPU 인덱스를 cpu_index라는 이름으로 생성
-        cpu_index = faiss.IndexFlatL2(d_main)
-        data = self.cached_candidate_k.to(torch.float32).detach().cpu().numpy()
+        # if self.search_index is None:
+        try:
+            res = faiss.StandardGpuResources()
+            cfg = faiss.GpuIndexFlatConfig()
+            cfg.device = torch.cuda.current_device()
 
-        if self.search_index is None:
-            try:
-                # GPU 가속 시도
-                res = faiss.StandardGpuResources()
-                self.search_index = faiss.index_cpu_to_gpu(res, torch.cuda.current_device(), cpu_index)
-            except:
-                # [수정] 위에서 만든 cpu_index를 안전하게 대입 (index라고 쓰면 안 됨)
-                self.search_index = cpu_index
+            # [수정] Cosine 유사도 계산을 위한 Inner Product 인덱스 사용, L1 등은 L2로 후보를 뽑는 방식 유지
+            if self.metric == 'cosine':
+                self.search_index = faiss.GpuIndexFlatIP(res, d_main, cfg)
+            else:
+                # L1, Mahalanobis, KL, Wasserstein 등은 1차적으로 L2로 후보를 뽑음 (Coarse Search)
+                self.search_index = faiss.GpuIndexFlatL2(res, d_main, cfg)
+        except AttributeError:
+
+                # GPU가 없는 경우 CPU 인덱스 사용
+                if self.metric == 'cosine':
+                    self.search_index = faiss.IndexFlatIP(d_main)
+                else:
+                    self.search_index = faiss.IndexFlatL2(d_main)
         
         self.search_index.reset()
+        # self.search_index.add(self.cached_candidate_k.to(torch.float32).detach().cpu().numpy())
+        # [수정] 코사인일 경우 미리 정규화해서 저장
+        data = self.cached_candidate_k.detach().cpu().numpy().astype('float32')
+        if self.metric == 'cosine':
+            faiss.normalize_L2(data)
+            
         self.search_index.add(data)
+
+    def _compute_similarity(self, k, context_k):
+        """다양한 지표를 계산하는 핵심 로직"""
+        if self.metric == 'l2':
+            return (-k.square().sum(-1, keepdim=True) 
+                    + (2 * (k[..., None, :] @ context_k.transpose(-1, -2))).squeeze(-2) 
+                    - context_k.square().sum(-1))
+        
+        elif self.metric == 'l1':
+            # (Batch, 1, Dim) - (Batch, Context, Dim) -> (Batch, Context, Dim)
+            return -torch.abs(k.unsqueeze(1) - context_k).sum(-1)
+
+        elif self.metric == 'cosine':
+            k_norm = F.normalize(k, p=2, dim=-1)
+            context_k_norm = F.normalize(context_k, p=2, dim=-1)
+            return (k_norm.unsqueeze(1) @ context_k_norm.transpose(-1, -2)).squeeze(-2)
+
+        elif self.metric == 'mahalanobis':
+            # W 행렬을 통과시켜 공간 왜곡 후 L2 계산
+            k_w = k @ self.W
+            context_k_w = context_k @ self.W
+            return (-k_w.square().sum(-1, keepdim=True) 
+                    + (2 * (k_w[..., None, :] @ context_k_w.transpose(-1, -2))).squeeze(-2) 
+                    - context_k_w.square().sum(-1))
+
+        elif self.metric == 'kl':
+            # 각 벡터를 확률 분포로 해석 (Softmax)
+            p = F.softmax(k.unsqueeze(1), dim=-1) # (B, 1, D)
+            q = F.softmax(context_k, dim=-1)      # (B, C, D)
+            # KL Divergence는 낮을수록 유사하므로 마이너스
+            return -torch.sum(p * (torch.log(p + 1e-8) - torch.log(q + 1e-8)), dim=-1)
+
+        elif self.metric == 'wasserstein':
+            # Sinkhorn 알고리즘을 사용한 정밀 거리 계산
+            batch_size, context_size, d_main = context_k.shape
+            k_expanded = k.unsqueeze(1).expand(-1, context_size, -1).reshape(-1, d_main)
+            ctx_expanded = context_k.reshape(-1, d_main)
+            
+            dists = sinkhorn_distance(k_expanded, ctx_expanded)
+            return -dists.view(batch_size, context_size)
+
+        return None
+
 
     def reset_parameters(self):
         if isinstance(self.label_encoder, nn.Linear):
@@ -293,11 +443,18 @@ class TabR(nn.Module):
             candidate_y = self.cached_candidate_y
 
         batch_size, d_main = k.shape
-
+    
+    ### ---- 수정 ---- ###
+        # 1단계 : FAISS 검색(Coarse Search)
         with torch.no_grad():
-            distances, context_idx = self.search_index.search(
-                k.to(torch.float32).detach().cpu().numpy(), context_size + (1 if is_train else 0)
-            )
+            search_k = k.to(torch.float32).detach().cpu().numpy()
+            if self.metric == 'cosine':
+                faiss.normalize_L2(search_k)
+            
+            # 2단계 재정렬을 위해 context_size보다 더 많은 후보를 검색 (예: context_size * 2)
+            fetch_size = context_size * 2
+            distances, context_idx = self.search_index.search(search_k, fetch_size + 1 if is_train else fetch_size)  # +1은 자기 자신을 제외하기 위함
+                # k.to(torch.float32).detach().cpu().numpy(), context_size + (1 if is_train else 0)            )
             distances = torch.tensor(distances, device=device)
             context_idx = torch.tensor(context_idx, device=device)
             if is_train:
@@ -306,22 +463,49 @@ class TabR(nn.Module):
 
         context_k = candidate_k[context_idx]
 
-        similarities = (
-            -k.square().sum(-1, keepdim=True)
-            + (2 * (k[..., None, :] @ context_k.transpose(-1, -2))).squeeze(-2)
-            - context_k.square().sum(-1)
-        )
-        probs = F.softmax(similarities, dim=-1)
+        # [수정] 위에서 정의한 다양한 지표로 유사도 계산
+        similarities = self._compute_similarity(k, context_k)
+        # similarities = (
+        #     -k.square().sum(-1, keepdim=True)
+        #     + (2 * (k[..., None, :] @ context_k.transpose(-1, -2))).squeeze(-2)
+        #     - context_k.square().sum(-1)
+        # )
+        
+        # 1. 2단계 재정렬: 192개 중 실제 사용할 96개(context_size)의 상위 이웃 선별
+        top_sim, top_indices = similarities.topk(context_size, dim=-1)
+
+        # 2. 확률 계산: 반드시 잘라낸 'top_sim'을 사용하여 softmax 계산 (차원: 96)
+        probs = F.softmax(top_sim, dim=-1)
         probs = self.dropout(probs)
 
+        # [수정] 데이터 슬라이싱 : context_idx, context_k, context_y_emb 등을 top_indices에 맞춰 재정렬하여 상위 context_size 후보들로만 구성되도록 함
+        # 3. 데이터 필터링 : 192개 후보 인덱스 중 실제 사용할 96개(context_size)의 인덱스만 선별하여 context_idx, context_k, context_y_emb 등을 재구성
+        # context_idx : [Batch, 192] -> [Batch, 96]
+        context_idx = context_idx.gather(-1, top_indices)
+
+        # 4. 필터링된 인덱스로 이웃의 k와 y 정보를 다시 가져옴.
+        context_k = candidate_k[context_idx] # [Batch, 96, d_main]
+        context_y = candidate_y[context_idx] # [Batch, 96]
+
+        # 5. Label Embedding 계산
         if self.n_classes > 1:
-            context_y_emb = self.label_encoder(candidate_y[context_idx][..., None].long())
+            context_y_emb = self.label_encoder(context_y[..., None].long())
         else:
-            context_y_emb = self.label_encoder(candidate_y[context_idx][..., None])
+            context_y_emb = self.label_encoder(context_y[..., None])
             if len(context_y_emb.shape) == 4:
                 context_y_emb = context_y_emb[:, :, 0, :]
 
+        # if self.n_classes > 1:
+        #     context_y_emb = self.label_encoder(candidate_y[context_idx][..., None].long())
+        # else:
+        #     context_y_emb = self.label_encoder(candidate_y[context_idx][..., None])
+        #     if len(context_y_emb.shape) == 4:
+        #         context_y_emb = context_y_emb[:, :, 0, :]
+
+        # 6. Values 계산 (모든 tensor가 96차원으로 통일)
         values = context_y_emb + self.T(k[:, None] - context_k)
+
+        # 7. 최종 가중합 : [Batch, 1, 96] @ [Batch, 96, d_main] -> [Batch, d_main]
         context_x = (probs[:, None] @ values).squeeze(1)
         x = x + context_x
 

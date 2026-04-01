@@ -3,7 +3,7 @@ import numpy as np
 
 large_datalist = [44159, 1113, 44027, 41960, 1169, 150, 44065, 44129, 1567, 5, 20, 12, 41147, 422]
 ### Define hyperparameter search space (Supplementary E)
-def get_search_space(trial, modelname, num_features=None, data_id=None):
+def get_search_space(trial, modelname, num_features=None, data_id=None, metric=None):
     if modelname == "randomforest":
         assert num_features is not None
         params = {
@@ -209,11 +209,15 @@ def get_search_space(trial, modelname, num_features=None, data_id=None):
                 "dropout0": trial.suggest_float('dropout0', 0.0, 0.6),
                 "d_multiplier": 2.0, "mixer_normalization": "auto", "dropout1": 0.0, "normalization": "LayerNorm", "activation": "ReLU",
                 "num_embeddings": {            
-                "d_embedding": trial.suggest_int('d_embedding', 8, 32) if data_id in large_set else trial.suggest_int('d_embedding', 16, 64),
-                "frequency_scale": trial.suggest_float('frequency_scale', 0.01, 100.0, log=True), 
-                "n_frequencies": trial.suggest_int('n_frequencies', 16, 96)},
+                    "d_embedding": trial.suggest_int('d_embedding', 8, 32) if data_id in large_set else trial.suggest_int('d_embedding', 16, 64),
+                    "frequency_scale": trial.suggest_float('frequency_scale', 0.01, 100.0, log=True), 
+                    "n_frequencies": trial.suggest_int('n_frequencies', 16, 96), # PLREncoding용
+                    "n_bins": trial.suggest_int('n_bins', 16, 128), # Soft Binning용
+                }, 
+                # "metric": metric if metric is not None else 'l2'  # 인자로 받은 metric을 그대로 사용하거나, 없으면 기본값 'l2'로 설정
+                "metric" : "wasserstein"  # 'l2', 'l1', 'cosine', 'mahalanobis', 'wasserstein', 'kl'
             },
-            "lr": trial.suggest_float('lr', 1e-05, 0.1, log=True), 
+            "lr": trial.suggest_float('lr', 1e-5, 1e-2, log=True), 
             "weight_decay": trial.suggest_float('weight_decay', 1e-06, 0.001, log=True), 'early_stopping_rounds': 20, 'lr_scheduler': trial.suggest_categorical('lr_scheduler', [True, False])
         }
     return params

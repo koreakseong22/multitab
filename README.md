@@ -1,3 +1,19 @@
+# TabR-SBW: Soft-Binning & Wasserstein distance for Tabular Deep Learning
+
+This repository contains the implementation of an enhanced TabR model featuring **Soft-Binning Tokenization** and **Wasserstein Distance-based Retrieval**.
+
+## 🚀 Key Contributions
+- **Soft-Binning Tokenization**: Converts numerical features into learnable probability distributions over bins.
+- **Two-stage Retrieval**: Combines fast FAISS coarse search with precise Wasserstein/KL re-ranking.
+- **Superior Logloss**: Achieved lower Logloss (1.5508) compared to ModernNCA on the Wine Quality dataset.
+
+## 📊 Experimental Results (Wine Quality 43986)
+| Model | Best Acc | Mean Logloss |
+| :--- | :---: | :---: |
+| ModernNCA | 0.7046 | 1.5654 |
+| **TabR-SBW (Ours)** | **0.6815** | **1.5508** |
+
+# ------------------------------------------------------ #
 # MultiTab
 The implementation codes of the paper "MultiTab: A Comprehensive Benchmark Suite for Multi-Dimensional Evaluation in Tabular Domains"
 (Paper URL: TBU)
@@ -13,7 +29,7 @@ The implementation codes of the paper "MultiTab: A Comprehensive Benchmark Suite
 - [References](#references)
 
 ## Overview
-`MultiTab` is a benchmark suite and evaluation framework designed to enable structured, data-aware analysis of tabular learning algorithms. It includes 196 datasets spanning both classification and regression tasks. `MultiTab` categorizes the entire data collection into diverse sub-categories based on seven specific characteristics of tabular data, such as data size, function irregularity, and feature interaction. For prediction algorithms, `MultiTab` incorporates 13 algorithms. Comprehensive hyperparameter tuning is performed for each algorithm and dataset to determine the optimal configurations. All optimization logs and results are available on `LGAI-DILab/Multitab`.
+`MultiTab` is a benchmark suite and evaluation framework designed to enable structured, data-aware analysis of tabular learning algorithms. It includes 196 datasets spanning both classification and regression tasks. `MultiTab` categorizes the entire data collection into diverse sub-categories based on seven specific characteristics of tabular data, such as data size, function irregularity, and feature interactio3n. For prediction algorithms, `MultiTab` incorporates 13 algorithms. Comprehensive hyperparameter tuning is performed for each algorithm and dataset to determine the optimal configurations. All optimization logs and results are available on `LGAI-DILab/Multitab`.
 
 See our paper at [TBU].
 
