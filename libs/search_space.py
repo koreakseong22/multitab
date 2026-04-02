@@ -215,7 +215,9 @@ def get_search_space(trial, modelname, num_features=None, data_id=None, metric=N
                     "n_bins": trial.suggest_int('n_bins', 16, 128), # Soft Binning용
                 }, 
                 # "metric": metric if metric is not None else 'l2'  # 인자로 받은 metric을 그대로 사용하거나, 없으면 기본값 'l2'로 설정
-                "metric" : "wasserstein"  # 'l2', 'l1', 'cosine', 'mahalanobis', 'wasserstein', 'kl'
+                "metric" : "wasserstein",  # 'l2', 'l1', 'cosine', 'mahalanobis', 'wasserstein', 'kl'
+                "lambda_w": trial.suggest_float('lambda_w', 0.01, 0.5, log=True),
+                "margin": trial.suggest_float('margin', 0.5, 2.0),
             },
             "lr": trial.suggest_float('lr', 1e-5, 1e-2, log=True), 
             "weight_decay": trial.suggest_float('weight_decay', 1e-06, 0.001, log=True), 'early_stopping_rounds': 20, 'lr_scheduler': trial.suggest_categorical('lr_scheduler', [True, False])

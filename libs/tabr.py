@@ -20,6 +20,65 @@ from libs.data import get_batch_size
 from libs.supervised import CallbackContainer, EarlyStopping, CosineAnnealingLR_Warmup
 
 
+# --- 추가 : Feature Interaction을 위한 모듈 ---
+class FeatureInteraction(nn.Module):
+    def __init__(self, d_embedding: int, n_heads: int = 4, dropout: float = 0.1):
+        super().__init__()
+        # [수정] d_embedding이 n_heads로 나누어떨어지도록 n_heads를 동적으로 설정.
+        self.attn_dim = ((d_embedding + n_heads - 1) // n_heads) * n_heads
+
+        # 입력 차원은 Attention 가능 차원으로 투영.
+        self.input_proj = nn.Linear(d_embedding, self.attn_dim)
+        
+        # 피처 토큰 간의 관계를 학습하기 위한 Multi-Head Attention
+        self.mha = nn.MultiheadAttention(self.attn_dim, n_heads, dropout=dropout, batch_first=True)
+        
+        # 다시 원래 d_embedding 차원으로 복구
+        self.output_proj = nn.Linear(self.attn_dim, d_embedding)
+        
+        self.ln = nn.LayerNorm(d_embedding)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_embedding, d_embedding * 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_embedding * 2, d_embedding),
+        )
+        self.ln2 = nn.LayerNorm(d_embedding)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: Tensor) -> Tensor:
+        # x: (Batch, n_features, d_embedding)
+        residual = x
+        
+        # 입력을 Attention 가능 차원으로 투영
+        x_proj = self.input_proj(x)
+        
+        # 1. Self-Attention: 어떤 피처가 다른 피처와 관련이 있는지 학습
+        attn_out, _ = self.mha(x_proj, x_proj, x_proj)
+        attn_out = self.output_proj(attn_out)  # 다시 원래 차원으로 복구
+        x = x + self.dropout(attn_out)
+        x = self.ln(x)
+        
+        # 2. Feed-Forward: 각 피처 토큰의 표현력을 강화
+        ffn_out = self.ffn(x)
+        x = x + self.dropout(ffn_out)
+        x = self.ln2(x)
+        return x
+    # def forward(self, x: Tensor) -> Tensor:
+    #     # x: (Batch, n_features, d_embedding)
+    #     residual = x
+    #     # 1. Self-Attention: 어떤 피처가 다른 피처와 관련이 있는지 학습
+    #     attn_out, _ = self.mha(x, x, x)
+    #     x = x + self.dropout(attn_out)
+    #     x = self.ln(x)
+        
+    #     # 2. Feed-Forward: 각 피처 토큰의 표현력을 강화
+    #     ffn_out = self.ffn(x)
+    #     x = x + self.dropout(ffn_out)
+    #     x = self.ln2(x)
+    #     return x
+
+
 # --- 추가: Wasserstein 계산을 위한 Sinkhorn 알고리즘 (Simplified) ---
 def sinkhorn_distance(x, y, eps=0.1, n_iters=5):
     """
@@ -193,10 +252,19 @@ class TabR(nn.Module):
         memory_efficient: bool = False,
         candidate_encoding_batch_size: Optional[int] = None,
         metric: str = 'l2',  # 추가: 'l1', 'cosine', 'mahalanobis', 'wasserstein', 'kl'
+        feature_interaction: bool = True,  # 추가: Feature Interaction 레이어 사용 여부
         **kwargs,
     ) -> None:
         super().__init__()
         self.metric = metric
+
+        # [추가] Feature Interaction 레이어 정의
+        self.user_interaction = feature_interaction
+        if self.user_interaction and num_embeddings is not None:
+            self.feature_interaction_layer = FeatureInteraction(
+                d_embedding = num_embeddings['d_embedding'],
+                # n_heads = 4,
+            )
 
         # [추가] Mahalanobis를 위한 학습 가능 행렬 (d_main x d_main)
         if self.metric == 'mahalanobis':
@@ -387,16 +455,38 @@ class TabR(nn.Module):
         else:
             nn.init.uniform_(self.label_encoder[0].weight, -1.0, 1.0)
 
+    # def _encode(self, x_num, x_cat):
+    #     x = []
+    #     if x_num is None:
+    #         self.num_embeddings = None
+    #     else:
+    #         x.append(
+    #             x_num if self.num_embeddings is None else self.num_embeddings(x_num).flatten(1)
+    #         )
+    #     if x_cat is not None:
+    #         x.append(x_cat)
+    #     x = torch.cat(x, dim=1)
+    #     x = self.linear(x)
+    #     for block in self.blocks0:
+    #         x = x + block(x)
+    #     k = self.K(x if self.normalization is None else self.normalization(x))
+    #     return x, k
     def _encode(self, x_num, x_cat):
         x = []
-        if x_num is None:
-            self.num_embeddings = None
-        else:
-            x.append(
-                x_num if self.num_embeddings is None else self.num_embeddings(x_num).flatten(1)
-            )
+        if x_num is not None:
+            # 1. 개별 feature embedding (Soft-binning etc.)
+            # tokens shape : (Batch, n_features, d_embedding)
+            tokens = self.num_embeddings(x_num)
+
+            # 2. [추가] Feature Interaction 레이어 적용 (피처 간의 관계 학습)
+            if self.user_interaction is not None:
+                tokens = self.feature_interaction_layer(tokens)
+            
+            # 3. Retriever 입력을 위한 flatten 작업
+            x.append(tokens.flatten(1))
         if x_cat is not None:
             x.append(x_cat)
+        
         x = torch.cat(x, dim=1)
         x = self.linear(x)
         for block in self.blocks0:
