@@ -484,68 +484,87 @@ class TabRMethod(object, metaclass=abc.ABCMeta):
     def train_epoch(self, epoch):
         self.model.train()
         tl = Averager()
+        
+        # [HDS-TabR 가설 검증 지표]
         entropy_log = Averager()
         active_log = Averager()
 
-        # 1. FAISS 인덱스 & 검색용 라벨 동기화 업데이트 (매우 중요)
-        # 훈련 데이터 중 최대 5만개를 검색 후보군(Memory Bank)으로 설정
-        c_n = self.N[:50000].float().to(self.device) if self.N is not None else None
-        c_c = self.C[:50000].to(self.device) if self.C is not None else None
-        c_y = self.y[:50000].to(self.device)
-        
-        # [수정] update_index가 y도 받아서 내부에 저장하도록 tabr.py를 고쳐야 함
-        self.model.update_index(c_n, c_c, c_y)
-
-        # 2. 가이드라인: Temperature Annealing 및 Centroid 학습 제어
-        # 지수적 감소: 1.0 -> 0.1 (r=0.05 설정 시 약 45에폭에서 0.1 도달)
+        # 1. 가이드라인: Temperature Annealing 및 Centroid 학습 제어
         new_tau = max(0.1, 1.0 * math.exp(-0.05 * (epoch - 1)))
         self.model.retriever.temperature.data = torch.tensor(new_tau).to(self.device)
-        
-        # 10에폭 이후부터 Centroid 위치 최적화 시작
         self.model.retriever.centroids.requires_grad = (epoch > 10)
 
-        # 3. 배치 학습
+        # 2. [NoneType 에러 해결] FAISS 인덱스 및 메모리 뱅크 초기화
+        # Adult 데이터셋(4.8만건)을 고려하여 최대 5만개의 후보군을 설정합니다.
+        if self.model.cached_candidate_k is None or self.model.search_index is None:
+            c_size = min(len(self.y), 50000)
+            candidate_x_num = self.N[:c_size].float().to(self.device) if self.N is not None else None
+            # [주의] 범주형(Category) 데이터는 Embedding 층 통과를 위해 float이 아닌 long 타입을 유지해야 합니다.
+            candidate_x_cat = self.C[:c_size].to(self.device) if self.C is not None else None
+            candidate_y = self.y[:c_size].to(self.device)
+            
+            if self.is_regression:
+                candidate_y = candidate_y.float()
+            
+            # update_index에 데이터를 직접 넘겨주어 search_index를 생성합니다.
+            # 이 메서드 내부에서 cached_candidate_k와 y도 함께 저장되도록 설계되었습니다.
+            self.model.update_index(candidate_x_num, candidate_x_cat, candidate_y)
+
+        # 3. 배치 학습 루프
         for batch_idx in make_random_batches(self.train_size, self.batch_size, self.device):
             self.train_step += 1
             
-            X_num = self.N[batch_idx].float() if self.N is not None else None
-            X_cat = self.C[batch_idx] if self.C is not None else None
-            y = self.y[batch_idx]
+            X_num = self.N[batch_idx].float().to(self.device) if self.N is not None else None
+            X_cat = self.C[batch_idx].to(self.device) if self.C is not None else None
+            y = self.y[batch_idx].to(self.device)
 
-            # Forward
-            logits = self.model(
-                x_num=X_num, x_cat=X_cat, y=y, 
-                candidate_x_num=None, candidate_x_cat=None, candidate_y=None, # 내부 캐시 사용
+            # [Adult 데이터셋 binclass 대응] 
+            # 모델의 최종 출력층(pred)이 [Batch, 1] 형태이므로, y도 [Batch, 1]과 float 타입이 필요합니다.
+            if self.tasktype == "binclass":
+                y_target = y.float().view(-1, 1)
+            elif self.is_regression:
+                y_target = y.float().view(-1, 1)
+            else: # multiclass
+                y_target = y.long()
+
+            # Forward Pass
+            # candidate_y 등을 None으로 주면 모델이 내부 캐시(cached_candidate_k)를 사용합니다.
+            pred = self.model(
+                x_num=X_num, 
+                x_cat=X_cat, 
+                y=y, 
+                candidate_x_num=None,
+                candidate_x_cat=None,
+                candidate_y=None,
                 context_size=self.context_size,
-                is_train=True
+                is_train=True,
             )
 
-            loss = self.criterion(logits, y)
+            # 4. [ValueError 해결] pred와 y_target의 차원을 일치시켜 손실 계산
+            loss = self.criterion(pred, y_target)
             
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
             
-            if hasattr(self, 'scheduler'):
+            if self.params.get("lr_scheduler") and (self.train_size > self.batch_size):
                 self.scheduler.step()
 
-            # [가이드라인 검증 지표 트래킹]
+            # 5. [HDS-TabR 지표 계산]
             with torch.no_grad():
-                # 현재 배치의 쿼리들이 어떤 Centroid에 쏠리는지 계산
+                # 현재 배치 쿼리가 어떤 센트로이드 구역을 선택하는지 확인
                 _, cluster_logits = self.model.retriever(self.model._encode(X_num, X_cat)[1], is_train=False)
                 w = F.softmax(cluster_logits / new_tau, dim=-1)
                 
-                # Sparsity(엔트로피): 낮을수록 특정 클러스터에 집중됨
                 entropy = -(w * torch.log(w + 1e-8)).sum(-1).mean()
                 entropy_log.add(entropy.item())
                 
-                # Active Ratio: 1% 이상의 확률을 가진 클러스터 비율
                 active_ratio = (w > 0.01).float().sum(-1).mean() / self.n_centroids
                 active_log.add(active_ratio.item())
 
             tl.add(loss.item())
 
-        # 결과 출력 (교수님께 보고할 핵심 지표)
+        # 에폭 로그 출력
         avg_loss = tl.item()
         print(f"\n[Epoch {epoch:03d}] Tau: {new_tau:.3f} | Loss: {avg_loss:.4f} | "
               f"Entropy: {entropy_log.item():.4f} | Active: {active_log.item()*100:.1f}%")
