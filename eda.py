@@ -7,7 +7,7 @@ from sklearn.preprocessing import StandardScaler
 
 # 1. 데이터 로드 (OpenML ID: 1504 - Steel Plates Fault)
 # Tip: data_id만 바꾸면 다른 데이터셋도 바로 분석 가능합니다.
-data_id = 54 
+data_id = 4538
 print(f"🚀 vehicle(ID: {data_id}) 로딩 중...")
 data = fetch_openml(data_id=data_id, as_frame=True, parser='auto')
 df = data.frame
