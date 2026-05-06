@@ -66,7 +66,10 @@ if train:
     # Set GPU environment variable
     # torch.cuda.set_device(args.gpu_id)
     # device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    device = torch.device(f'cuda:{args.gpu_id}' if torch.cuda.is_available() else 'cpu')
+    if args.gpu_id == -1:
+        device = torch.device('cpu')
+    else:
+        device = torch.device(f'cuda:{args.gpu_id}' if torch.cuda.is_available() else 'cpu')
     import platform
     env_info = '{0}:{1}'.format(platform.node(), args.gpu_id)
     print(env_info, device)
@@ -145,4 +148,5 @@ if train:
     df.to_csv(os.path.join(savepath, f'data={args.openml_id}..model={args.modelname}.csv'), index=False)
     joblib.dump(study, fname)
     print(fname)
-    print("#######################################")
+    print("#############################################")
+    

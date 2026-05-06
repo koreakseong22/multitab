@@ -123,18 +123,42 @@ def split_data(X, y, tasktype, num_indices=[], seed=0, device='cuda'):
 
 ## following Gorishniy et al., 2021
 def prep_data(X_train, X_val, X_test, y_train, y_val, y_test, num_indices=[], tasktype='multiclass'):
-    device = X_train.get_device()
+    device = X_train.device
     if len(num_indices) > 0:
         quantile_transformer = QuantileTransformer(output_distribution='uniform', random_state=42)
-        X_train[:, num_indices] = torch.tensor(quantile_transformer.fit_transform(X_train[:, num_indices].cpu().numpy()), device=device)
-        X_val[:, num_indices] = torch.tensor(quantile_transformer.transform(X_val[:, num_indices].cpu().numpy()), device=device)
-        X_test[:, num_indices] = torch.tensor(quantile_transformer.transform(X_test[:, num_indices].cpu().numpy()), device=device)
+        X_train[:, num_indices] = torch.as_tensor(
+            quantile_transformer.fit_transform(X_train[:, num_indices].cpu().numpy()),
+            device=device,
+            dtype=X_train.dtype,
+        )
+        X_val[:, num_indices] = torch.as_tensor(
+            quantile_transformer.transform(X_val[:, num_indices].cpu().numpy()),
+            device=device,
+            dtype=X_val.dtype,
+        )
+        X_test[:, num_indices] = torch.as_tensor(
+            quantile_transformer.transform(X_test[:, num_indices].cpu().numpy()),
+            device=device,
+            dtype=X_test.dtype,
+        )
     if tasktype == "regression":
         standard_transformer = StandardScaler()
-        y_train = torch.tensor(standard_transformer.fit_transform(y_train.reshape(-1, 1).cpu().numpy()).reshape(-1), device=device)
+        y_train = torch.as_tensor(
+            standard_transformer.fit_transform(y_train.reshape(-1, 1).cpu().numpy()).reshape(-1),
+            device=device,
+            dtype=y_train.dtype,
+        )
         y_std = standard_transformer.scale_.item()
-        y_val = torch.tensor(standard_transformer.transform(y_val.reshape(-1, 1).cpu().numpy()).reshape(-1), device=device)
-        y_test = torch.tensor(standard_transformer.transform(y_test.reshape(-1, 1).cpu().numpy()).reshape(-1), device=device)
+        y_val = torch.as_tensor(
+            standard_transformer.transform(y_val.reshape(-1, 1).cpu().numpy()).reshape(-1),
+            device=device,
+            dtype=y_val.dtype,
+        )
+        y_test = torch.as_tensor(
+            standard_transformer.transform(y_test.reshape(-1, 1).cpu().numpy()).reshape(-1),
+            device=device,
+            dtype=y_test.dtype,
+        )
     else:
         y_std = 1.
     return (X_train, y_train), (X_val, y_val), (X_test, y_test), y_std
@@ -169,3 +193,4 @@ class TabularDataset(torch.utils.data.Dataset):
             return self.X_val[idx], self.y_val[idx]
         else:
             return self.X_test[idx], self.y_test[idx]
+    

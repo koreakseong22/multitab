@@ -281,18 +281,19 @@ class ModernNCAMethod(object, metaclass=abc.ABCMeta):
         self.N = X_train[:, self.num_cols]
         self.C = X_train[:, self.cat_features]
         if self.tasktype == "multiclass":
-            self.y = torch.argmax(y_train, dim=1)
+            self.y = torch.argmax(y_train, dim=1).long()
         else:
             self.y = y_train
 
         self.batch_size = get_batch_size(len(X_train))
 
         if self.tasktype == "regression":
-            self.criterion = F.mse_loss 
+            self.criterion = F.mse_loss
         elif self.tasktype == "multiclass":
-            self.criterion = F.cross_entropy
+            self.criterion = F.nll_loss  # forward()가 이미 log(prob)를 출력하므로 nll_loss 사용
         else:
-            self.criterion = F.binary_cross_entropy
+            self.criterion = lambda pred, y: F.binary_cross_entropy(  # 수치 오차로 [0,1] 범위를 벗어나는 경우 방지
+                pred.clamp(1e-7, 1 - 1e-7), y)
             
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(), 
@@ -375,7 +376,7 @@ class ModernNCAMethod(object, metaclass=abc.ABCMeta):
 
     def validate(self, epoch, X_val, y_val):
         if self.tasktype == "multiclass":
-            y_val = torch.argmax(y_val, dim=1)
+            y_val = torch.argmax(y_val, dim=1).long()
         else:
             y_val = y_val
             
@@ -413,11 +414,11 @@ class ModernNCAMethod(object, metaclass=abc.ABCMeta):
                     x, candidate_x = torch.cat([X_num, X_cat], dim=1),torch.cat([candidate_x_num, candidate_x_cat], dim=1)
     
                 val_pred = self.model(
-                    x = x,
-                    y = None,
-                    candidate_x = candidate_x,
-                    candidate_y = candidate_y,
-                    is_train = False,
+                    x=x,
+                    y=None,
+                    candidate_x=candidate_x,
+                    candidate_y=candidate_y,
+                    is_train=False,
                 ).squeeze(-1)
 
                 # if self.tasktype == "binclass":
@@ -468,11 +469,11 @@ class ModernNCAMethod(object, metaclass=abc.ABCMeta):
                     x, candidate_x = torch.cat([X_num, X_cat], dim=1),torch.cat([candidate_x_num, candidate_x_cat], dim=1)
     
                 val_pred = self.model(
-                    x = x,
-                    y = None,
-                    candidate_x = candidate_x,
-                    candidate_y = candidate_y,
-                    is_train = False,
+                    x=x,
+                    y=None,
+                    candidate_x=candidate_x,
+                    candidate_y=candidate_y,
+                    is_train=False,
                 ).squeeze(-1)
 
                 # if self.tasktype == "binclass":
@@ -523,11 +524,11 @@ class ModernNCAMethod(object, metaclass=abc.ABCMeta):
                     x, candidate_x = torch.cat([X_num, X_cat], dim=1),torch.cat([candidate_x_num, candidate_x_cat], dim=1)
     
                 val_pred = self.model(
-                    x = x,
-                    y = None,
-                    candidate_x = candidate_x,
-                    candidate_y = candidate_y,
-                    is_train = False,
+                    x=x,
+                    y=None,
+                    candidate_x=candidate_x,
+                    candidate_y=candidate_y,
+                    is_train=False,
                 ).squeeze(-1)
 
                 # if self.tasktype == "binclass":
@@ -540,4 +541,5 @@ class ModernNCAMethod(object, metaclass=abc.ABCMeta):
         if logit:
             return logits.detach().cpu().numpy()
         else:
-            return torch.nn.functional.softmax(logits).detach().cpu().numpy()
+            return torch.nn.functional.softmax(logits, dim=-1).detach().cpu().numpy()
+    
