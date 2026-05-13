@@ -113,9 +113,9 @@ class RandomForest(torch.nn.Module):
         self.params = params
         self.tasktype = tasktype
         if self.tasktype == "regression":
-            self.model = RandomForestRegressor(**params)
+            self.model = RandomForestRegressor(**params, n_jobs=-1)
         else:
-            self.model = RandomForestClassifier(**params)
+            self.model = RandomForestClassifier(**params, n_jobs=-1)
         
     def fit(self, X_train, y_train, X_val, y_val):
         if self.tasktype == "multiclass":

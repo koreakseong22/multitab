@@ -83,9 +83,9 @@ def load_data(openml_id):
             X[:, col] = X[:, col].astype(np.float32)
 
     y = y.values
-    if isinstance(y[0], str) or isinstance(y[0], (bool, np.bool_)):
-        labelencoder = LabelEncoder()
-        y = labelencoder.fit_transform(y)
+    # LabelEncoder 항상 적용 (TabZilla 기준 통일)
+    labelencoder = LabelEncoder()
+    y = labelencoder.fit_transform(y)
 
     print("full data size", X.shape)
     return X, y, cat_cols, cat_cardinality, num_cols
@@ -102,8 +102,13 @@ def split_data(X, y, tasktype, num_indices=[], seed=0, device='cuda'):
     if tasktype == "multiclass":
         y = one_hot(y)
     
-    kf = KFold(n_splits=10, shuffle=True, random_state=42)
-    fold_idx = list(kf.split(X))
+    # StratifiedKFold로 변경 (TabZilla 벤치마크 기준 통일)
+    # 기존 KFold는 클래스 비율을 보존하지 않아 희귀 클래스가 fold에서 누락되면
+    # AUROC가 undefined(nan)가 되는 문제가 있음 (sklearn 공식 문서 권장 방식)
+    from sklearn.model_selection import StratifiedKFold
+    y_for_split = np.argmax(y, axis=1) if y.ndim > 1 else y
+    kf = StratifiedKFold(n_splits=10, shuffle=True, random_state=42)
+    fold_idx = list(kf.split(X, y_for_split))
     tr_idx, te_idx = fold_idx[seed]
     val_split_idx = (seed+1) % 10
     _, val_idx = fold_idx[val_split_idx]
