@@ -33,6 +33,18 @@ def load_data(openml_id):
         X, y, categorical_indicator, attribute_names = dataset.get_data(
             target="class"
         )
+    elif openml_id == 43454:
+        dataset = openml.datasets.get_dataset(openml_id)
+        print(f'Dataset is loaded.. Data name: {dataset.name}, Target feature: loan_status')
+        X, y, categorical_indicator, attribute_names = dataset.get_data(
+            target="loan_status"
+        )
+    elif openml_id == 43823:
+        dataset = openml.datasets.get_dataset(openml_id)
+        print(f'Dataset is loaded.. Data name: {dataset.name}, Target feature: Heart_Disease')
+        X, y, categorical_indicator, attribute_names = dataset.get_data(
+            target="Heart_Disease"
+        )
     else:
         dataset = openml.datasets.get_dataset(openml_id)
         print(f'Dataset is loaded.. Data name: {dataset.name}, Target feature: {dataset.default_target_attribute}')
@@ -198,4 +210,3 @@ class TabularDataset(torch.utils.data.Dataset):
             return self.X_val[idx], self.y_val[idx]
         else:
             return self.X_test[idx], self.y_test[idx]
-    
