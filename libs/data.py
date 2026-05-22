@@ -90,9 +90,20 @@ def load_data(openml_id):
         colencoder = LabelEncoder()
         X[col] = colencoder.fit_transform(X[col])
     X = X.values
+    invalid_num_cols = []
     for col in num_cols:
         if X[:, col].dtype == np.object_:
-            X[:, col] = X[:, col].astype(np.float32)
+            try:
+                X[:, col] = X[:, col].astype(np.float32)
+            except (ValueError, TypeError):
+                invalid_num_cols.append(col)
+    if invalid_num_cols:
+        print(f"  [data.py] categorical_indicator 미반영 문자열 컬럼 제거: {invalid_num_cols}")
+        keep_mask = [i for i in range(X.shape[1]) if i not in invalid_num_cols]
+        X = X[:, keep_mask]
+        num_cols = [keep_mask.index(i) for i in num_cols if i not in invalid_num_cols]
+        cat_cols = [keep_mask.index(i) for i in cat_cols if i not in invalid_num_cols]
+    X = X.astype(np.float32)
 
     y = y.values
     # LabelEncoder 항상 적용 (TabZilla 기준 통일)
