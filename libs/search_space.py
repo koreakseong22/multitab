@@ -227,6 +227,52 @@ def get_search_space(trial, modelname, num_features=None, data_id=None, metric=N
             "early_stopping_rounds": 10,
             'lr_scheduler': True,
         }
+    elif modelname == "ptarl":
+        # PTaRL: Prototype-based Tabular Representation Learning via Space Calibration
+        # Hangting Ye et al., ICLR 2024 — https://arxiv.org/abs/2407.05364
+        #
+        # Two-stage pipeline:
+        #   Stage 1: backbone pre-training (task loss only)
+        #   Stage 2: freeze backbone, train PTaRL projection
+        #            (task loss + OT loss + diversity + orthogonality)
+        #
+        # n_prototype: paper sets K = ceil(log(n_features)), computed automatically in PTaRLMethod
+        # lambda_div, lambda_orth: paper Appendix A.6 sensitivity range {0.01, 0.1, 1.0}
+        large_set = [
+            44059, 44131, 40685, 45548, 41169, 41162, 42345, 41168, 40922, 23512, 40672,
+            44161, 41150, 1509, 44057, 43928, 44069, 1503, 44068, 44159, 1113, 44027,
+            1169, 150, 44065, 44129, 1567,
+        ]
+        stage1_epochs = trial.suggest_int('stage1_epochs', 30, 70, step=10)
+        params = {
+            # ── Backbone 구조 ────────────────────────────────────────────
+            # 원논문은 FTT/ResNet backbone의 HP를 stage2에서 그대로 상속.
+            # MultiTab 공정 비교를 위해 backbone HP도 함께 탐색.
+            "d_hidden":     trial.suggest_categorical('d_hidden', [64, 128])
+                            if data_id in large_set
+                            else trial.suggest_categorical('d_hidden', [64, 128, 256]),
+            "n_blocks":     0
+                            if data_id in large_set
+                            else trial.suggest_int('n_blocks', 0, 3),
+            "dropout":      trial.suggest_float('dropout', 0.0, 0.5, step=0.05),
+
+            # ── PTaRL Projection Loss 가중치 ─────────────────────────────
+            # 원논문 Appendix A.6: sensitivity range {0.01, 0.1, 1.0}
+            "lambda_div":   trial.suggest_float('lambda_div',  1e-2, 1.0, log=True),
+            "lambda_orth":  trial.suggest_float('lambda_orth', 1e-2, 1.0, log=True),
+
+            # ── Optimizer ────────────────────────────────────────────────
+            "lr":           trial.suggest_float('lr',           1e-4, 1e-2, log=True),
+            "lr_s2":        trial.suggest_float('lr_s2',        1e-4, 1e-2, log=True),
+            "weight_decay": trial.suggest_float('weight_decay', 1e-6, 1e-2, log=True),
+
+            # ── 학습 에폭 배분 ───────────────────────────────────────────
+            # 총 epoch = 100 고정, stage1 + stage2 = 100
+            # 원논문: 두 stage 동일 배분 (50/50) 권장
+            "stage1_epochs":         stage1_epochs,
+            "stage2_epochs":         100 - stage1_epochs,
+            "early_stopping_rounds": 20,
+        }
     return params
 
 
@@ -252,6 +298,10 @@ def add_default_params(modelname, params, data_id):
             'n_epochs': 50 if data_id in large_datalist else 100,
             'early_stopping_rounds': 20
         })
+    elif modelname == "ptarl":
+        # stage2_epochs = 100 - stage1_epochs 는 get_search_space에서 이미 계산됨.
+        # early_stopping_rounds도 이미 포함되어 있으므로 별도 update 불필요.
+        pass
     return params
 
 
@@ -295,6 +345,15 @@ def rearrange_params(modelname, data_id, params):
             params["model"].setdefault("normalization", "LayerNorm")
             params["model"].setdefault("activation", "ReLU")
 
+    # 4. PTaRL 보정 — stage2_epochs / loss 가중치 누락 시 복원
+    elif modelname == "ptarl":
+        stage1 = params.get("stage1_epochs", 50)
+        params.setdefault("stage2_epochs",         100 - stage1)
+        params.setdefault("early_stopping_rounds", 20)
+        params.setdefault("lambda_div",            0.1)
+        params.setdefault("lambda_orth",           0.1)
+        params.setdefault("lr_s2",                 params.get("lr", 1e-3))
+
     return params
 
 
@@ -313,7 +372,22 @@ def suggest_initial_trial(modelname):
         "t2gformer": {"activation": "relu", "optimizer": "AdamW"}, # t2gformer
         "saint": {"learning_rate": 0.0001, "weight_decay" : 0.01, "activation": "relu", "optimizer": "AdamW", "attn_dropout": 0.1, "ff_dropout": 0.8}, #SAINT
         "modernnca": {"n_blocks": 0, "weight_decay": 0.0002, "lr": 0.01},
-        "tabr": {"d_main": 265, "encoder_n_blocks": 0, "predictor_n_blocks": 1}
+        "tabr": {"d_main": 265, "encoder_n_blocks": 0, "predictor_n_blocks": 1},
+        # PTaRL: 원논문 Appendix A 권장값 기반
+        # stage1/stage2 각 50 epoch, lambda 0.1, backbone d_hidden=128 1-block
+        "ptarl": {
+            "d_hidden":              128,
+            "n_blocks":              1,
+            "dropout":               0.1,
+            "lambda_div":            0.1,
+            "lambda_orth":           0.1,
+            "lr":                    1e-3,
+            "lr_s2":                 1e-3,
+            "weight_decay":          1e-5,
+            "stage1_epochs":         50,
+            "stage2_epochs":         50,
+            "early_stopping_rounds": 20,
+        },
     }
     assert modelname in init_values
     return init_values[modelname]

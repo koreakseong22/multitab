@@ -1,4 +1,3 @@
-
 ## Main file for optimizing each model for a specific [dataset, preprocessing method] setup.
 ## Paper info: MultiTab: A Comprehensive Benchmark Suite with Multi-Dimensional Analysis in Tabular Domains
 ## Contact author: Kyungeun Lee (kyungeun.lee@lgresearch.ai)
@@ -20,7 +19,7 @@ parser.add_argument("--gpu_id", type=int, default=4, help="gpu index")
 parser.add_argument("--openml_id", type=int, default=40672, help="dataset index (See dataset_id.json for detailed information)")
 parser.add_argument("--seed", type=int, default=1, help="seed for dataset split (cross-validation)")
 parser.add_argument("--modelname", type=str, default="resnet", 
-                    choices=['randomforest', 'xgboost', 'catboost', 'lightgbm', 'mlp', 'embedmlp', 'mlpplr', 'ftt', 'resnet', 't2gformer', 'saint', 'modernnca', 'tabr']) #lr, tabpfn not here -- only in reproduce.py
+                    choices=['randomforest', 'xgboost', 'catboost', 'lightgbm', 'mlp', 'embedmlp', 'mlpplr', 'ftt', 'resnet', 't2gformer', 'saint', 'modernnca', 'tabr', 'ptarl']) #lr, tabpfn not here -- only in reproduce.py
 parser.add_argument("--savepath", type=str, default=".", help="path to save the results")
 
 # 추가
@@ -149,4 +148,3 @@ if train:
     joblib.dump(study, fname)
     print(fname)
     print("#############################################")
-    
