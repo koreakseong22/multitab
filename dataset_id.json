@@ -1194,7 +1194,8 @@
     "43454": {
         "name": "CRD",
         "fullname": "Credit-Risk-Dataset",
-        "tasktype": "binclass"
+        "tasktype": "binclass",
+        "target_col": "loan_status"
     },
     "1597": {
         "name": "CC",
