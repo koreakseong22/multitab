@@ -17,8 +17,24 @@ def calculate_auroc(y_true, y_pred):
 
 def calculate_multi_auroc(y_true, y_pred):
     try:
-        return roc_auc_score(y_true, y_pred, average='macro', multi_class='ovr')
-    except ValueError:
+        # y_true가 one-hot이면 1D 라벨로 변환
+        y_true_1d = np.argmax(y_true, axis=1) if (hasattr(y_true, 'ndim') and y_true.ndim > 1) else y_true
+
+        # val/test split에서 일부 클래스가 누락된 경우 대응
+        # probs 열 수와 실제 등장 클래스가 불일치할 때 present 클래스만 선택
+        present = sorted(np.unique(y_true_1d).tolist())
+        n_classes_prob = y_pred.shape[1] if (hasattr(y_pred, 'ndim') and y_pred.ndim > 1) else None
+
+        if n_classes_prob is not None and len(present) < n_classes_prob:
+            y_pred_sub = y_pred[:, present]
+            row_sum = y_pred_sub.sum(axis=1, keepdims=True)
+            y_pred_sub = y_pred_sub / np.where(row_sum > 0, row_sum, 1.0)
+            return roc_auc_score(y_true_1d, y_pred_sub, average='macro',
+                                 multi_class='ovr', labels=present)
+
+        return roc_auc_score(y_true_1d, y_pred, average='macro',
+                             multi_class='ovr', labels=present)
+    except (ValueError, IndexError):
         return None
 
 def calculate_f1_score(y_true, y_pred, average='binary'):
@@ -114,4 +130,3 @@ def is_study_todo(study, tasktype, optimal_value=1.0, num_trials=100):
     donelen = len(completed_trials)
     print(f'Study is not yet complete. {donelen}')
     return True
-
