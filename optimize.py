@@ -19,7 +19,7 @@ parser.add_argument("--gpu_id", type=int, default=4, help="gpu index")
 parser.add_argument("--openml_id", type=int, default=40672, help="dataset index (See dataset_id.json for detailed information)")
 parser.add_argument("--seed", type=int, default=1, help="seed for dataset split (cross-validation)")
 parser.add_argument("--modelname", type=str, default="resnet", 
-                    choices=['randomforest', 'xgboost', 'catboost', 'lightgbm', 'mlp', 'embedmlp', 'mlpplr', 'ftt', 'resnet', 't2gformer', 'saint', 'modernnca', 'tabr', 'ptarl']) #lr, tabpfn not here -- only in reproduce.py
+                    choices=['randomforest', 'xgboost', 'catboost', 'lightgbm', 'mlp', 'embedmlp', 'mlpplr', 'ftt', 'resnet', 't2gformer', 'saint', 'modernnca', 'tabr', 'ptarl', 'tabm']) #lr, tabpfn not here -- only in reproduce.py
 parser.add_argument("--savepath", type=str, default=".", help="path to save the results")
 
 # 추가

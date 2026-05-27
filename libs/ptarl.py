@@ -1,618 +1,418 @@
-## Reference
-## PTaRL: Prototype-based Tabular Representation Learning via Space Calibration
-## Hangting Ye et al., ICLR 2024
-## https://arxiv.org/abs/2407.05364
-##
-## Implementation follows the ModernNCA pattern in MultiTab (modernnca.py).
-## PTaRL is a model-agnostic two-stage pipeline:
-##   Stage 1: Train backbone (FT-Transformer style MLP) normally
-##   Stage 2: Freeze backbone, add PTaRL prototype projection head,
-##            re-train projection with OT + diversity + orthogonalization losses
-##
-## Backbone: simple ResNet-style MLP (same family as MultiTab's resnet.py)
-## HPO: follows original paper (Appendix A) — backbone HPs inherited in stage 2,
-##      PTaRL-specific HPs: n_prototype (=ceil(log(n_features))), lambda_div, lambda_orth
+"""
+libs/ptarl.py
+=============
+PTaRL: Prototype-based Tabular Representation Learning via Space Calibration
+Paper: Hangting Ye et al., ICLR 2024
+Official code: https://github.com/HangtingYe/PTaRL
+
+원본 코드 (train_final_version.py, models.py) 기반 충실 구현.
+
+핵심 구조 (원본 그대로):
+  - Stage 1: Encoder(MLP backbone) + Head 일반 학습
+  - K-Means: Stage1 완료 후 encoder hidden으로 prototype 초기화
+  - Stage 2: OT loss + Diversity loss (contrastive) + Orthogonality loss
+
+원본 loss 수식:
+  OT:          loss -= ot_weight * mean(sum(r * cosine(hidden, topic) / norm))
+  Diversity:   contrastive on r coordinates (same-class positive pairs)
+  Orthogonal:  l1/l2 + 0.5 * |K - l1|   (topic matrix sparsity)
+
+n_clusters = ceil(log2(n_num_features + n_cat_features))  [원본]
+
+search_space.py 파라미터:
+  d_hidden, n_blocks, dropout,
+  lambda_div (diversity_weight), lambda_orth (r_weight),
+  lr, lr_s2 (stage2 lr), weight_decay,
+  stage1_epochs, stage2_epochs, early_stopping_rounds
+"""
 
 import math
-import abc
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
-from tqdm import tqdm
 from sklearn.cluster import KMeans
+from tqdm import tqdm
 
+from libs.supervised import CallbackContainer, EarlyStopping, CosineAnnealingLR_Warmup
 from libs.data import get_batch_size
 
 
 # ─────────────────────────────────────────────────────────────
-# Backbone: ResNet-style MLP (PTaRL paper uses FTT / ResNet)
-# We use a simple Pre-LN ResidualMLP stack — consistent with MultiTab
+# Encoder backbone (원본 Models/mlp.py 구조 기반)
 # ─────────────────────────────────────────────────────────────
 
-class ResidualBlock(nn.Module):
-    def __init__(self, d_in: int, d_hidden: int, dropout: float = 0.1):
+class ResBlock(nn.Module):
+    def __init__(self, d: int, dropout: float):
         super().__init__()
         self.net = nn.Sequential(
-            nn.LayerNorm(d_in),
-            nn.Linear(d_in, d_hidden),
+            nn.LayerNorm(d),
+            nn.Linear(d, d * 2),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(d_hidden, d_in),
+            nn.Linear(d * 2, d),
             nn.Dropout(dropout),
         )
-
     def forward(self, x):
         return x + self.net(x)
 
 
-class BackboneMLP(nn.Module):
-    """
-    Simple residual MLP backbone.
-    PTaRL paper uses FT-Transformer or ResNet as backbone;
-    here we use a lighter residual MLP consistent with MultiTab's style.
-    """
-    def __init__(
-        self,
-        d_in: int,
-        d_hidden: int,
-        n_blocks: int,
-        d_out: int,
-        dropout: float = 0.1,
-    ):
+class PTaRLEncoder(nn.Module):
+    """원본의 MLP encoder (backbone). hidden representation 반환."""
+    def __init__(self, input_dim: int, d_hidden: int, n_blocks: int, dropout: float):
         super().__init__()
         self.proj = nn.Sequential(
-            nn.LayerNorm(d_in),
-            nn.Linear(d_in, d_hidden),
-        )
-        self.blocks = nn.Sequential(
-            *[ResidualBlock(d_hidden, d_hidden * 2, dropout) for _ in range(n_blocks)]
-        )
-        self.head = nn.Sequential(
+            nn.Linear(input_dim, d_hidden),
             nn.LayerNorm(d_hidden),
-            nn.Linear(d_hidden, d_out),
+            nn.GELU(),
         )
+        # n_blocks=0이면 빈 ModuleList → loop 자체 미실행
+        self.blocks = nn.ModuleList([ResBlock(d_hidden, dropout) for _ in range(n_blocks)])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.head(self.blocks(self.proj(x)))
+        z = self.proj(x)
+        for blk in self.blocks:
+            z = blk(z)
+        return z
 
-    def encode(self, x: torch.Tensor) -> torch.Tensor:
-        """Return representation before final head (for PTaRL projection)."""
-        return self.blocks(self.proj(x))
 
-
-# ─────────────────────────────────────────────────────────────
-# PTaRL Projection Components
-# ─────────────────────────────────────────────────────────────
-
-class PrototypeEstimator(nn.Module):
+class PTaRLNet(nn.Module):
     """
-    3-layer MLP estimator φ(·; γ) that maps representations to P-Space coordinates.
-    Paper §3.2: "The estimator φ(·; γ) is a simple 3-layer fully-connected MLP."
+    원본 models.py의 Model 클래스에 대응.
+
+    구성 (원본과 동일):
+      encoder  : PTaRLEncoder  (backbone Gf)
+      head     : Linear(d_hidden → output_dim)  (Gh)
+      reduce   : 3-layer MLP → topic_num  (estimator ϕ, 원본과 동일한 3 hidden layer)
+      topic    : nn.Parameter (K, d_hidden)  — K-Means 초기화 후 설정
     """
-    def __init__(self, d_rep: int, n_prototype: int):
+    def __init__(self, input_dim: int, output_dim: int,
+                 d_hidden: int, n_blocks: int, n_proto: int, dropout: float):
         super().__init__()
-        d_hidden = max(d_rep, n_prototype * 2)
-        self.net = nn.Sequential(
-            nn.Linear(d_rep, d_hidden),
-            nn.ReLU(),
-            nn.Linear(d_hidden, d_hidden),
-            nn.ReLU(),
-            nn.Linear(d_hidden, n_prototype),
+        self.n_proto   = n_proto
+        self.d_hidden  = d_hidden
+
+        self.encoder = PTaRLEncoder(input_dim, d_hidden, n_blocks, dropout)
+        self.head    = nn.Linear(d_hidden, output_dim)
+
+        # 원본 reduce 네트워크 (3 hidden layers, 동일한 구조)
+        self.reduce = nn.Sequential(
+            nn.Linear(d_hidden, d_hidden), nn.GELU(), nn.Dropout(0.1),
+            nn.Linear(d_hidden, d_hidden), nn.GELU(), nn.Dropout(0.1),
+            nn.Linear(d_hidden, d_hidden), nn.GELU(), nn.Dropout(0.1),
+            nn.Linear(d_hidden, n_proto),
         )
 
-    def forward(self, z: torch.Tensor) -> torch.Tensor:
-        """Returns coordinates in P-Space: (B, K)"""
-        return self.net(z)
-
-
-class PTaRLModel(nn.Module):
-    """
-    Full PTaRL model: Backbone + Prototype Projection Head.
-
-    Forward returns logits (for prediction) and p_space_coords (for OT loss).
-    In Stage 1, only backbone is used.
-    In Stage 2, backbone is frozen; estimator + prediction head trained.
-    """
-    def __init__(
-        self,
-        d_in: int,
-        d_hidden: int,
-        n_blocks: int,
-        d_out: int,
-        n_prototype: int,
-        dropout: float = 0.1,
-    ):
-        super().__init__()
-        self.backbone = BackboneMLP(d_in, d_hidden, n_blocks, d_out, dropout)
-        self.d_rep = d_hidden
-        self.n_prototype = n_prototype
-        self.d_out = d_out
-
-        # PTaRL components (Stage 2)
-        self.estimator = PrototypeEstimator(d_hidden, n_prototype)
-        # Prediction head: from P-Space coords to output
-        self.ptarl_head = nn.Linear(n_prototype, d_out)
-
-        # Global prototypes B ∈ R^{K×d_rep}: learnable basis vectors
-        self.prototypes = nn.Parameter(torch.randn(n_prototype, d_hidden))
-
-    def forward_backbone(self, x: torch.Tensor):
-        """Stage 1: standard backbone prediction."""
-        return self.backbone(x)
-
-    def forward_ptarl(self, x: torch.Tensor):
-        """Stage 2: PTaRL projection prediction."""
-        with torch.no_grad():
-            z = self.backbone.encode(x)          # (B, d_rep)
-        coords = self.estimator(z)               # (B, K) — P-Space coordinates
-        logits = self.ptarl_head(coords)         # (B, d_out)
-        return logits, coords, z
-
-    def forward(self, x: torch.Tensor, stage: int = 2):
-        if stage == 1:
-            return self.forward_backbone(x)
-        else:
-            logits, coords, z = self.forward_ptarl(x)
-            return logits
-
-    def init_prototypes_kmeans(self, z_all: torch.Tensor):
-        """
-        Initialize global prototypes with K-Means on training representations.
-        Paper §3.1: 'We initialize the global prototypes with K-Means clustering.'
-        """
-        z_np = z_all.detach().cpu().numpy()
-        k = self.n_prototype
-        kmeans = KMeans(n_clusters=k, n_init=10, random_state=42)
-        kmeans.fit(z_np)
-        centers = torch.tensor(kmeans.cluster_centers_, dtype=torch.float32)
-        with torch.no_grad():
-            self.prototypes.copy_(centers)
-
-
-# ─────────────────────────────────────────────────────────────
-# OT Loss (Sinkhorn approximation)
-# ─────────────────────────────────────────────────────────────
-
-def sinkhorn(cost: torch.Tensor, eps: float = 0.1, n_iter: int = 20) -> torch.Tensor:
-    """
-    Sinkhorn algorithm for OT plan.
-    cost: (B, K) cost matrix
-    Returns transport plan T: (B, K)
-    """
-    B, K = cost.shape
-    # Uniform marginals
-    a = torch.ones(B, device=cost.device) / B
-    b = torch.ones(K, device=cost.device) / K
-
-    log_M = -cost / eps
-    log_u = torch.zeros(B, device=cost.device)
-    log_v = torch.zeros(K, device=cost.device)
-
-    for _ in range(n_iter):
-        log_u = torch.log(a) - torch.logsumexp(log_M + log_v.unsqueeze(0), dim=1)
-        log_v = torch.log(b) - torch.logsumexp(log_M + log_u.unsqueeze(1), dim=0)
-
-    T = torch.exp(log_M + log_u.unsqueeze(1) + log_v.unsqueeze(0))
-    return T
-
-
-def ot_loss(coords: torch.Tensor, z: torch.Tensor, prototypes: torch.Tensor) -> torch.Tensor:
-    """
-    OT loss: align P-Space coordinates with prototype distances.
-    Paper eq.(3): minimize transport cost between representation distribution
-    and prototype distribution.
-
-    coords:     (B, K) — estimated P-Space coordinates (softmax normalized)
-    z:          (B, d_rep) — backbone representations
-    prototypes: (K, d_rep) — global prototype vectors
-    """
-    # Cost matrix: L2 distance between each sample and each prototype
-    # cost[i,j] = ||z_i - B_j||^2
-    cost = torch.cdist(z, prototypes, p=2).pow(2)   # (B, K)
-
-    # Transport plan
-    T = sinkhorn(cost.detach(), eps=0.1, n_iter=20)  # (B, K)
-
-    # OT loss: <T, cost>
-    loss = (T * cost).sum()
-    return loss
-
-
-def diversity_loss(coords: torch.Tensor) -> torch.Tensor:
-    """
-    Coordinates Diversifying Constraint (paper §3.3):
-    push representations of different samples apart in P-Space.
-    Implemented as negative mean pairwise cosine similarity (contrastive style).
-    """
-    coords_norm = F.normalize(coords, dim=1)        # (B, K)
-    sim = coords_norm @ coords_norm.T               # (B, B)
-    B = coords.size(0)
-    mask = 1.0 - torch.eye(B, device=coords.device)
-    loss = (sim * mask).sum() / (B * (B - 1) + 1e-8)
-    return loss
-
-
-def orthogonality_loss(prototypes: torch.Tensor) -> torch.Tensor:
-    """
-    Matrix Orthogonalization Constraint (paper §3.3):
-    make prototype vectors orthogonal to ensure independence.
-    ||B B^T - I||_F^2
-    """
-    K = prototypes.size(0)
-    proto_norm = F.normalize(prototypes, dim=1)     # (K, d_rep)
-    gram = proto_norm @ proto_norm.T                # (K, K)
-    identity = torch.eye(K, device=prototypes.device)
-    loss = (gram - identity).pow(2).sum()
-    return loss
-
-
-# ─────────────────────────────────────────────────────────────
-# PTaRLMethod: MultiTab-compatible wrapper (modernnca.py 패턴)
-# ─────────────────────────────────────────────────────────────
-
-class PTaRLMethod(object, metaclass=abc.ABCMeta):
-    """
-    PTaRL wrapper following ModernNCAMethod interface in MultiTab.
-
-    Exposes: fit(X_train, y_train, X_val, y_val)
-             predict(X_test) -> np.ndarray
-             predict_proba(X_test, logit=False) -> np.ndarray
-
-    Two-stage training:
-      Stage 1 (stage1_epochs): train backbone normally with task loss
-      Stage 2 (stage2_epochs): freeze backbone, train PTaRL projection
-                                with task loss + OT + diversity + orthogonality
-    """
-
-    def __init__(
-        self,
-        params: dict,
-        tasktype: str,
-        num_cols=None,
-        cat_features=None,
-        input_dim: int = 0,
-        output_dim: int = 0,
-        device: str = "cuda",
-        data_id=None,
-        modelname: str = "ptarl",
-    ):
-        super().__init__()
-
-        self.num_cols     = num_cols if num_cols is not None else []
-        self.cat_features = cat_features if cat_features is not None else []
-        self.tasktype     = tasktype
-        self.params       = params
-        self.data_id      = data_id
-        self.device       = device
-
-        self.is_binclass   = (tasktype == "binclass")
-        self.is_multiclass = (tasktype == "multiclass")
-        self.is_regression = (tasktype == "regression")
-
-        self.max_epoch     = params.get("early_stopping_rounds", 20) * 5  # 총 에폭 상한
-        self.stage1_epochs = params.get("stage1_epochs", 50)
-        self.stage2_epochs = params.get("stage2_epochs", 50)
-        self.patience      = params.get("early_stopping_rounds", 20)
-
-        # n_prototype: paper sets K = ceil(log(n_features))
-        # We expose it as tunable but default to paper's rule
-        n_features_all = len(self.num_cols) + len(self.cat_features)
-        self.n_prototype = params.get(
-            "n_prototype",
-            max(2, math.ceil(math.log(max(n_features_all, 2))))
+        # topic (prototype matrix): K-Means 초기화 전 임시 zeros
+        self.topic = nn.Parameter(
+            torch.zeros(n_proto, d_hidden), requires_grad=True
         )
 
-        # Build model
-        self.model = PTaRLModel(
-            d_in        = input_dim,
-            d_hidden    = params["d_hidden"],
-            n_blocks    = params["n_blocks"],
-            d_out       = output_dim,
-            n_prototype = self.n_prototype,
-            dropout     = params["dropout"],
-        ).to(device)
-        self.model.float()
+    def forward(self, x: torch.Tensor):
+        """Returns (logits, r, hidden)."""
+        hidden = self.encoder(x)                        # (B, D)
+        r      = torch.softmax(self.reduce(hidden), dim=1)  # (B, K) — 원본과 동일
+        logits = self.head(hidden)                      # (B, out)
+        return logits, r, hidden
 
-        # Loss weights (PTaRL §3.3)
-        self.lambda_div  = params.get("lambda_div",  0.1)
-        self.lambda_orth = params.get("lambda_orth", 0.1)
+    def init_topic_from_kmeans(self, centers: np.ndarray):
+        """K-Means cluster centers로 topic 초기화 (원본 generate_topic 대응)."""
+        with torch.no_grad():
+            self.topic.copy_(
+                torch.tensor(centers, dtype=torch.float32).to(self.topic.device)
+            )
 
-        # Training log
-        self.trlog = {
-            "args": params,
-            "train_loss_s1": [],
-            "train_loss_s2": [],
-            "best_epoch_s1": 0,
-            "best_epoch_s2": 0,
-            "best_res": 1e10 if self.is_regression else 0,
-        }
 
-    # ── 내부 헬퍼 ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# Loss 함수 (원본 run_one_epoch 내부 수식 그대로)
+# ─────────────────────────────────────────────────────────────
 
-    def _get_criterion(self):
-        if self.is_regression:
+def ot_loss(hidden: torch.Tensor, r: torch.Tensor, topic: torch.Tensor,
+            ot_weight: float) -> torch.Tensor:
+    """
+    원본:
+        norm = sqrt(sum(hidden^2)) * sqrt(sum(topic.T^2))
+        loss_ot = mean(sum(r * (hidden @ topic.T / norm)))
+        loss -= ot_weight * loss_ot
+    → 반환값을 loss에서 빼야 하므로 음수로 반환.
+    """
+    norm = (
+        torch.sqrt((hidden ** 2).sum(dim=1, keepdim=True)) *
+        torch.sqrt((topic.T ** 2).sum(dim=0, keepdim=True))
+    ).clamp(min=1e-8)                                          # (B, K)
+    cos_ht    = (hidden.float() @ topic.T.float()) / norm      # (B, K)
+    loss_ot   = torch.mean(torch.sum(r * cos_ht, dim=1))
+    return -ot_weight * loss_ot   # loss에 더하면 됨 (= loss -= ot_weight * loss_ot)
+
+
+def diversity_loss(r: torch.Tensor, y: torch.Tensor,
+                   tasktype: str, div_weight: float) -> torch.Tensor:
+    """
+    원본 Coordinates Diversifying Constraint.
+    - 50% 랜덤 샘플링
+    - positive pair = 같은 클래스(분류) 또는 같은 bin(회귀)
+    - contrastive: -sum(pos_mask * (cos - log_denom)) / pos_count
+    """
+    n = r.shape[0]
+    idx = np.random.choice(n, max(int(n * 0.5), 2), replace=False)
+    r_sel = r[idx]
+
+    coord     = F.normalize(r_sel.float(), dim=1)
+    cos_sim   = torch.clamp(coord @ coord.T, -1.0, 1.0)       # (m, m)
+
+    if tasktype != "regression":
+        y_sel  = y.reshape(-1)[idx]
+        pos_mask = (y_sel.unsqueeze(1) == y_sel.unsqueeze(0)).float()
+    else:
+        y_flat = y.reshape(-1)
+        y_min, y_max = y_flat.min(), y_flat.max()
+        num_bin = max(1 + int(math.log2(n)), 2)
+        interval = (y_max - y_min) / num_bin + 1e-8
+        y_assign = torch.clamp(
+            ((y_flat - y_min) / interval).long(), 0, num_bin - 1
+        )
+        y_sel    = y_assign[idx]
+        pos_mask = (y_sel.unsqueeze(1) == y_sel.unsqueeze(0)).float()
+
+    pos_count = pos_mask.sum().clamp(min=1.0)
+    log_denom = torch.logsumexp(cos_sim.reshape(-1), dim=0)
+    loss_div  = -(pos_mask * (cos_sim - log_denom)).sum() / pos_count
+    return div_weight * loss_div
+
+
+def orthogonality_loss(topic: torch.Tensor, r_weight: float) -> torch.Tensor:
+    """
+    원본 Matrix Orthogonalization Constraint (Eq. 7):
+        r1 = sqrt(sum(topic^2, dim=1, keepdim=True))
+        topic_matrix = (topic @ topic.T) / (r1 @ r1.T)
+        topic_matrix = clamp(abs(topic_matrix), 0, 1)
+        l1 = sum(abs(topic_matrix))
+        l2 = sum(topic_matrix^2)
+        loss_sparse = l1 / l2
+        loss_constraint = abs(l1 - K)
+        r_loss = loss_sparse + 0.5 * loss_constraint
+    """
+    r1           = torch.sqrt((topic.float() ** 2).sum(dim=1, keepdim=True)).clamp(min=1e-8)
+    topic_matrix = (topic.float() @ topic.T.float()) / (r1 @ r1.T)
+    topic_matrix = torch.clamp(topic_matrix.abs(), 0.0, 1.0)
+    l1           = topic_matrix.abs().sum()
+    l2           = (topic_matrix ** 2).sum().clamp(min=1e-8)
+    loss_sparse  = l1 / l2
+    loss_const   = (l1 - topic_matrix.shape[0]).abs()
+    return r_weight * (loss_sparse + 0.5 * loss_const)
+
+
+# ─────────────────────────────────────────────────────────────
+# 헬퍼
+# ─────────────────────────────────────────────────────────────
+
+def _n_proto(n_num: int, n_cat: int) -> int:
+    """원본: n_clusters = ceil(log2(n_num + n_cat))."""
+    total = max(n_num + n_cat, 2)
+    return max(int(math.ceil(math.log2(total))), 2)
+
+
+# ─────────────────────────────────────────────────────────────
+# MultiTab 래퍼
+# ─────────────────────────────────────────────────────────────
+
+class PTaRLMethod:
+    """
+    MultiTab supmodel 인터페이스 (fit / predict / predict_proba).
+
+    model.py 호출 형식:
+        PTaRLMethod(params, tasktype, dataset.X_num, dataset.X_cat,
+                    input_dim=input_dim, output_dim=output_dim,
+                    device=device, data_id=openml_id)
+    """
+
+    def __init__(self, params, tasktype,
+                 num_cols=[], cat_features=[],
+                 input_dim=0, output_dim=1,
+                 device="cuda", data_id=None, modelname="ptarl"):
+        self.params      = params
+        self.tasktype    = tasktype
+        self.device      = device
+        self.data_id     = data_id
+        self.modelname   = modelname
+        self._input_dim  = input_dim
+        self._output_dim = output_dim
+        self._n_num      = len(num_cols)
+        self._n_cat      = len(cat_features)
+        self.model       = None
+
+    def _build_model(self, n_train: int):
+        p       = self.params
+        n_proto = _n_proto(self._n_num, self._n_cat)
+        self.model = PTaRLNet(
+            input_dim  = self._input_dim,
+            output_dim = self._output_dim,
+            d_hidden   = p["d_hidden"],
+            n_blocks   = p["n_blocks"],
+            n_proto    = n_proto,
+            dropout    = p["dropout"],
+        ).to(self.device)
+
+    def _get_loss_fn(self):
+        if self.tasktype == "regression":
             return F.mse_loss
-        elif self.is_multiclass:
-            return F.cross_entropy
-        else:
+        elif self.tasktype == "binclass":
             return F.binary_cross_entropy_with_logits
+        return F.cross_entropy
 
-    def _prep_y(self, y: torch.Tensor) -> torch.Tensor:
-        """multiclass: argmax, else: squeeze."""
-        if self.is_multiclass:
-            return torch.argmax(y, dim=1) if y.ndim == 2 else y.long()
-        return y.squeeze(-1) if y.ndim == 2 else y
+    def _make_loaders(self, X_train, y_train, X_val, y_val, batch_size):
+        drop_last    = (len(X_train) % batch_size == 1)
+        train_loader = torch.utils.data.DataLoader(
+            torch.utils.data.TensorDataset(X_train, y_train),
+            batch_size=batch_size, shuffle=True, drop_last=drop_last)
+        val_loader   = torch.utils.data.DataLoader(
+            torch.utils.data.TensorDataset(X_val, y_val),
+            batch_size=batch_size, shuffle=False)
+        return train_loader, val_loader
 
-    def _is_better(self, new_val: float, best_val: float) -> bool:
-        if self.is_regression:
-            return new_val < best_val
-        return new_val > best_val
-
-    def _forward_x(self, X: torch.Tensor, stage: int):
-        """Runs model on full input (no num/cat split; MultiTab pre-stacks them)."""
-        return self.model(X.float(), stage=stage)
-
-    @torch.no_grad()
-    def _encode_all(self, X: torch.Tensor, batch_size: int = 512) -> torch.Tensor:
-        """Encode training set for K-Means init."""
-        self.model.eval()
-        zs = []
-        for i in range(0, X.size(0), batch_size):
-            zs.append(self.model.backbone.encode(X[i:i+batch_size].float()))
-        return torch.cat(zs, dim=0)
-
-    # ── Stage 1: Backbone Pre-training ────────────────────────
-
-    def _stage1(self, X_train, y_train, X_val, y_val):
-        criterion  = self._get_criterion()
-        optimizer  = torch.optim.AdamW(
-            self.model.backbone.parameters(),
-            lr=self.params["lr"],
-            weight_decay=self.params["weight_decay"],
-        )
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=self.stage1_epochs
-        )
-
-        best_val  = 1e10 if self.is_regression else 0.0
-        best_state = None
-        no_improve = 0
-        batch_size = get_batch_size(len(X_train))
-
-        pbar = tqdm(range(1, self.stage1_epochs + 1),
-                    desc="PTaRL S1", ncols=80, leave=False)
-
-        for epoch in pbar:
-            self.model.train()
-            perm  = torch.randperm(len(X_train), device=self.device)
-
-            for i in range(0, len(X_train), batch_size):
-                idx    = perm[i:i+batch_size]
-                xb     = X_train[idx].float()
-                yb     = self._prep_y(y_train[idx])
-                logits = self.model(xb, stage=1)
-                if self.is_binclass:
-                    logits = logits.squeeze(-1)
-                    yb = yb.float()
-                loss = criterion(logits, yb)
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-
-            scheduler.step()
-            self.trlog["train_loss_s1"].append(loss.item())
-
-            # Validation
-            val_metric = self._eval_metric(X_val, y_val, stage=1)
-            if self._is_better(val_metric, best_val):
-                best_val   = val_metric
-                best_state = {k: v.clone() for k, v in self.model.state_dict().items()}
-                self.trlog["best_epoch_s1"] = epoch
-                no_improve = 0
-            else:
-                no_improve += 1
-            if no_improve >= self.patience:
-                break
-
-            pbar.set_description(f"PTaRL S1 e{epoch} val={val_metric:.4f}")
-
-        # Restore best backbone
-        if best_state is not None:
-            self.model.load_state_dict(best_state)
-
-    # ── Stage 2: PTaRL Projection Training ───────────────────
-
-    def _stage2(self, X_train, y_train, X_val, y_val):
-        # Freeze backbone
-        for p in self.model.backbone.parameters():
-            p.requires_grad_(False)
-
-        # K-Means init for prototypes
-        z_all = self._encode_all(X_train)
-        self.model.init_prototypes_kmeans(z_all)
-
-        # Only train estimator, ptarl_head, prototypes
-        s2_params = (
-            list(self.model.estimator.parameters())
-            + list(self.model.ptarl_head.parameters())
-            + [self.model.prototypes]
-        )
-        criterion = self._get_criterion()
-        optimizer = torch.optim.AdamW(
-            s2_params,
-            lr=self.params.get("lr_s2", self.params["lr"]),
-            weight_decay=self.params["weight_decay"],
-        )
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=self.stage2_epochs
-        )
-
-        best_val   = 1e10 if self.is_regression else 0.0
-        best_state = None
-        no_improve = 0
-        batch_size = get_batch_size(len(X_train))
-
-        pbar = tqdm(range(1, self.stage2_epochs + 1),
-                    desc="PTaRL S2", ncols=80, leave=False)
-
-        for epoch in pbar:
-            self.model.train()
-            # backbone remains frozen
-            self.model.backbone.eval()
-
-            perm = torch.randperm(len(X_train), device=self.device)
-            epoch_loss = 0.0
-
-            for i in range(0, len(X_train), batch_size):
-                idx    = perm[i:i+batch_size]
-                xb     = X_train[idx].float()
-                yb     = self._prep_y(y_train[idx])
-
-                logits, coords, z = self.model.forward_ptarl(xb)
-                if self.is_binclass:
-                    logits = logits.squeeze(-1)
-                    yb = yb.float()
-
-                # Task loss
-                loss_task = criterion(logits, yb)
-
-                # Softmax coords for OT (treat as probability distribution over K)
-                coords_soft = F.softmax(coords, dim=1)
-
-                # OT loss
-                loss_ot = ot_loss(coords_soft, z.detach(), self.model.prototypes)
-
-                # Diversity loss (coordinates diversifying constraint)
-                loss_div = diversity_loss(coords_soft)
-
-                # Orthogonality loss (matrix orthogonalization constraint)
-                loss_orth = orthogonality_loss(self.model.prototypes)
-
-                loss = (
-                    loss_task
-                    + loss_ot
-                    + self.lambda_div  * loss_div
-                    + self.lambda_orth * loss_orth
-                )
-
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                epoch_loss = loss.item()
-
-            scheduler.step()
-            self.trlog["train_loss_s2"].append(epoch_loss)
-
-            # Validation
-            val_metric = self._eval_metric(X_val, y_val, stage=2)
-            if self._is_better(val_metric, best_val):
-                best_val   = val_metric
-                best_state = {k: v.clone() for k, v in self.model.state_dict().items()}
-                self.trlog["best_epoch_s2"] = epoch
-                no_improve = 0
-            else:
-                no_improve += 1
-            if no_improve >= self.patience:
-                break
-
-            pbar.set_description(f"PTaRL S2 e{epoch} val={val_metric:.4f}")
-
-        # Restore best
-        if best_state is not None:
-            self.model.load_state_dict(best_state)
-
-        # Unfreeze backbone (for predict compatibility)
-        for p in self.model.backbone.parameters():
-            p.requires_grad_(True)
-
-    # ── Metric helper ─────────────────────────────────────────
-
-    @torch.no_grad()
-    def _eval_metric(self, X_val, y_val, stage: int = 2) -> float:
-        self.model.eval()
-        logits_list = []
-        batch_size = 512
-
-        for i in range(0, X_val.size(0), batch_size):
-            xb = X_val[i:i+batch_size].float()
-            if stage == 1:
-                out = self.model(xb, stage=1)
-            else:
-                out = self.model(xb, stage=2)
-            logits_list.append(out)
-
-        logits = torch.cat(logits_list, dim=0)
-        y = self._prep_y(y_val)
-
-        if self.is_regression:
-            if logits.ndim > 1:
-                logits = logits.squeeze(-1)
-            return float(F.mse_loss(logits, y.float()).sqrt().item())
-        elif self.is_multiclass:
-            preds = logits.argmax(dim=1)
-            return float((preds == y).float().mean().item())
-        else:
-            preds = (torch.sigmoid(logits.squeeze(-1)) > 0.5).long()
-            return float((preds == y.long()).float().mean().item())
-
-    # ── Public interface (ModernNCA 호환) ─────────────────────
+    # ── fit ─────────────────────────────────────────────────
 
     def fit(self, X_train, y_train, X_val, y_val):
-        """Two-stage PTaRL training."""
-        self.batch_size = get_batch_size(len(X_train))
+        if y_train.ndim == 1:
+            y_train = y_train.unsqueeze(1)
+            y_val   = y_val.unsqueeze(1)
 
-        # Stage 1: backbone pre-training
-        self._stage1(X_train, y_train, X_val, y_val)
+        self._build_model(len(X_train))
 
-        # Stage 2: PTaRL projection
-        self._stage2(X_train, y_train, X_val, y_val)
+        p          = self.params
+        device     = self.device
+        batch_size = get_batch_size(len(X_train))
+        loss_fn    = self._get_loss_fn()
 
-    def predict(self, X_test) -> np.ndarray:
+        train_loader, val_loader = self._make_loaders(
+            X_train, y_train, X_val, y_val, batch_size)
+
+        # ── Stage 1: 일반 supervised 학습 ───────────────────
+        # 원본: lr=1e-4 고정, weight_decay만 config에서
+        s1_opt = torch.optim.AdamW(
+            self.model.parameters(),
+            lr=p["lr"], weight_decay=p["weight_decay"]
+        )
+        s1_epochs = p["stage1_epochs"]
+
+        pbar = tqdm(range(1, s1_epochs + 1))
+        pbar.set_description("PTaRL Stage1")
+        for epoch in pbar:
+            self.model.train()
+            ep_loss = 0.0
+            for x_b, y_b in train_loader:
+                x_b, y_b = x_b.to(device), y_b.to(device)
+                s1_opt.zero_grad()
+                logits, _, _ = self.model(x_b)
+                if logits.size() != y_b.size():
+                    logits = logits.view(y_b.size())
+                loss = loss_fn(logits, y_b)
+                loss.backward()
+                s1_opt.step()
+                ep_loss = loss.item()
+            pbar.set_postfix_str(f"data_id:{self.data_id}, loss:{ep_loss:.5f}")
+
+        # ── K-Means prototype 초기화 (원본 generate_topic) ──
         self.model.eval()
-        logits_list = []
-        batch_size = 512
-
+        hiddens = []
         with torch.no_grad():
-            for i in range(0, X_test.size(0), batch_size):
-                xb = X_test[i:i+batch_size].float()
-                logits_list.append(self.model(xb, stage=2))
+            for x_b, _ in train_loader:
+                h = self.model.encoder(x_b.to(device))
+                hiddens.append(h.cpu().numpy())
+        hiddens = np.concatenate(hiddens, axis=0)
 
-        logits = torch.cat(logits_list, dim=0)
+        kmeans  = KMeans(n_clusters=self.model.n_proto, n_init=10, random_state=0)
+        centers = kmeans.fit(hiddens).cluster_centers_   # (K, d_hidden)
+        self.model.init_topic_from_kmeans(centers)
 
-        if self.is_regression:
-            return logits.squeeze(-1).cpu().numpy()
-        elif self.is_multiclass:
-            return logits.argmax(dim=1).cpu().numpy()
-        else:
-            return (torch.sigmoid(logits.squeeze(-1)) > 0.5).long().cpu().numpy()
+        # ── Stage 2: OT + Diversity + Orthogonality loss ──
+        s2_opt    = torch.optim.AdamW(
+            self.model.parameters(),
+            lr=p["lr_s2"], weight_decay=p["weight_decay"]
+        )
+        s2_epochs = p["stage2_epochs"]
+        patience  = p["early_stopping_rounds"]
 
-    def predict_proba(self, X_test, logit: bool = False) -> np.ndarray:
+        callback = CallbackContainer([
+            EarlyStopping(early_stopping_metric="val_loss", patience=patience)
+        ])
+
+        pbar2 = tqdm(range(1, s2_epochs + 1))
+        pbar2.set_description("PTaRL Stage2")
+        for epoch in pbar2:
+            self.model.train()
+            ep_loss = 0.0
+            for x_b, y_b in train_loader:
+                x_b, y_b = x_b.to(device), y_b.to(device)
+                s2_opt.zero_grad()
+
+                logits, r, hidden = self.model(x_b)
+                if logits.size() != y_b.size():
+                    logits = logits.view(y_b.size())
+
+                # task loss
+                loss = loss_fn(logits, y_b)
+                # OT loss (원본: loss -= ot_weight * loss_ot)
+                loss = loss + ot_loss(hidden, r, self.model.topic, p["lambda_div"])
+                # Diversity loss (contrastive on r)
+                loss = loss + diversity_loss(r, y_b, self.tasktype, p["lambda_div"])
+                # Orthogonality loss
+                loss = loss + orthogonality_loss(self.model.topic, p["lambda_orth"])
+
+                loss.backward()
+                s2_opt.step()
+                ep_loss = loss.item()
+
+            pbar2.set_postfix_str(f"data_id:{self.data_id}, loss:{ep_loss:.5f}")
+
+            # Validation
+            self.model.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for x_v, y_v in val_loader:
+                    x_v, y_v = x_v.to(device), y_v.to(device)
+                    logits, _, _ = self.model(x_v)
+                    if logits.size() != y_v.size():
+                        logits = logits.view(y_v.size())
+                    val_loss += loss_fn(logits, y_v).item()
+            val_loss /= len(val_loader)
+
+            callback.on_epoch_end(epoch, {"val_loss": val_loss, "epoch": epoch})
+            if any(cb.should_stop for cb in callback.callbacks):
+                print(f"Early stopping at epoch {epoch}")
+                break
+
         self.model.eval()
-        logits_list = []
-        batch_size = 512
 
+    # ── predict ─────────────────────────────────────────────
+
+    def predict(self, X_test):
+        self.model.eval()
         with torch.no_grad():
-            for i in range(0, X_test.size(0), batch_size):
-                xb = X_test[i:i+batch_size].float()
-                logits_list.append(self.model(xb, stage=2))
+            logits = self._forward_batched(X_test)
+            if self.tasktype == "binclass":
+                return torch.sigmoid(logits).round().detach().cpu().numpy()
+            elif self.tasktype == "regression":
+                return logits.detach().cpu().numpy()
+            else:
+                return torch.argmax(logits, dim=1).detach().cpu().numpy()
 
-        logits = torch.cat(logits_list, dim=0)
+    def predict_proba(self, X_test, logit=False):
+        self.model.eval()
+        with torch.no_grad():
+            logits = self._forward_batched(X_test)
+            if logit:
+                return logits.detach().cpu().numpy()
+            if self.tasktype == "binclass":
+                return torch.sigmoid(logits).detach().cpu().numpy()
+            elif self.tasktype == "multiclass":
+                return F.softmax(logits, dim=-1).detach().cpu().numpy()
+            return None
 
-        if logit:
-            return logits.cpu().numpy()
-
-        if self.is_multiclass:
-            # overflow 방지: logits를 max 기준으로 shift 후 softmax
-            logits = logits - logits.max(dim=1, keepdim=True).values
-            probs = F.softmax(logits, dim=1).cpu().numpy()
-        else:
-            prob_pos = torch.sigmoid(logits.squeeze(-1)).cpu().numpy()
-            probs = np.stack([1 - prob_pos, prob_pos], axis=1)
-
-        # nan/inf → 0으로 대체 후 행 합 재정규화
-        probs = np.nan_to_num(probs, nan=0.0, posinf=0.0, neginf=0.0)
-        row_sum = probs.sum(axis=1, keepdims=True)
-        row_sum = np.where(row_sum == 0, 1.0, row_sum)
-        probs = probs / row_sum
-        return probs
+    def _forward_batched(self, X, batch_size: int = 1024):
+        parts = []
+        for i in range(0, len(X), batch_size):
+            xb       = X[i: i + batch_size].to(self.device)
+            logits, _, _ = self.model(xb)
+            parts.append(logits.cpu())
+        return torch.cat(parts, dim=0)

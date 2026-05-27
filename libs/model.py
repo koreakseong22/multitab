@@ -10,6 +10,7 @@ from libs.saint import main_saint
 from libs.modernnca import ModernNCAMethod
 from libs.tabr import TabRMethod
 from libs.ptarl import PTaRLMethod
+from libs.tabm import TabMMethod
 from libs.search_space import get_search_space
 
 def getmodel(modelname, params, tasktype, dataset, openml_id, input_dim, output_dim, device):
@@ -70,6 +71,10 @@ def getmodel(modelname, params, tasktype, dataset, openml_id, input_dim, output_
         model = PTaRLMethod(params, tasktype, dataset.X_num, dataset.X_cat, input_dim=input_dim, output_dim=output_dim, device=device, data_id=openml_id)
     elif modelname == "ptarl":
         model = PTaRLMethod(params, tasktype, dataset.X_num, dataset.X_cat, input_dim=input_dim, output_dim=1, device=device, data_id=openml_id)
+    elif (modelname == "tabm") & (tasktype == "multiclass"):
+        model = TabMMethod(params, tasktype, dataset.X_num, dataset.X_cat, input_dim=input_dim, output_dim=output_dim, device=device, data_id=openml_id)
+    elif modelname == "tabm":
+        model = TabMMethod(params, tasktype, dataset.X_num, dataset.X_cat, input_dim=input_dim, output_dim=1, device=device, data_id=openml_id)
     return model
 
 def add_default_params(modelname, params, data_id=None):
@@ -117,5 +122,8 @@ def add_default_params(modelname, params, data_id=None):
     elif modelname == "ptarl":
         # stage2_epochs = 100 - stage1_epochs 는 get_search_space에서 이미 계산됨.
         # early_stopping_rounds도 이미 포함되어 있으므로 별도 update 불필요.
+        pass
+    elif modelname == "tabm":
+        # n_epochs, early_stopping_rounds 이미 get_search_space에 포함.
         pass
     return params
