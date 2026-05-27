@@ -235,7 +235,6 @@ def get_search_space(trial, modelname, num_features=None, data_id=None, metric=N
             44161, 41150, 1509, 44057, 43928, 44069, 1503, 44068, 44159, 1113, 44027,
             1169, 150, 44065, 44129, 1567,
         ]
-        stage1_epochs = trial.suggest_int('stage1_epochs', 30, 70, step=10)
         params = {
             "d_hidden":     trial.suggest_categorical('d_hidden', [64, 128])
                             if data_id in large_set
@@ -247,8 +246,8 @@ def get_search_space(trial, modelname, num_features=None, data_id=None, metric=N
             "lr":           trial.suggest_float('lr',           1e-4, 1e-2, log=True),
             "lr_s2":        trial.suggest_float('lr_s2',        1e-4, 1e-2, log=True),
             "weight_decay": trial.suggest_float('weight_decay', 1e-6, 1e-2, log=True),
-            "stage1_epochs":         stage1_epochs,
-            "stage2_epochs":         100 - stage1_epochs,
+            "stage1_epochs":         50,   # 원본 논문 고정값
+            "stage2_epochs":         50,   # 원본 논문 고정값
             "early_stopping_rounds": 20,
         }
     elif modelname == "tabm":
