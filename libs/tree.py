@@ -171,8 +171,12 @@ class CatBoost(torch.nn.Module):
         
     def predict(self, X_test):
         X_test = pd.DataFrame(X_test.cpu()).astype({k: 'int' for k in self.cat_features})
-        return self.model.predict(X_test)
-    
+        preds = self.model.predict(X_test)
+        # multiclass: CatBoost가 float 2D 또는 문자열로 반환하는 경우 정수 1D로 변환
+        if self.tasktype == "multiclass":
+            return np.array(preds).flatten().astype(int)
+        return preds
+
     def predict_proba(self, X_test, logit=False):
         X_test = pd.DataFrame(X_test.cpu()).astype({k: 'int' for k in self.cat_features})
         if logit:
@@ -209,7 +213,11 @@ class XGBoost(torch.nn.Module):
         
     def predict(self, X_test):
         X_test = pd.DataFrame(X_test.cpu()).astype({k: 'int' for k in self.cat_features})
-        return self.model.predict(X_test)
+        preds = self.model.predict(X_test)
+        # multiclass: XGBoost multi:softmax가 float로 반환하는 경우 정수 1D로 변환
+        if self.tasktype == "multiclass":
+            return np.array(preds).flatten().astype(int)
+        return preds
     
     def predict_proba(self, X_test, logit=False):
         X_test = pd.DataFrame(X_test.cpu()).astype({k: 'int' for k in self.cat_features})
