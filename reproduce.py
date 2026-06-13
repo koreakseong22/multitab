@@ -66,7 +66,9 @@ directory = os.path.join(args.savepath, 'reproduce_logs', f'seed={args.seed}', f
 if not os.path.exists(directory):
     os.makedirs(directory)
 
-models = ["lr", "randomforest", "xgboost", "catboost", "lightgbm", "mlp", "embedmlp", "mlpplr", "resnet", "ftt", "t2gformer", "saint", "tabpfn"]
+models = ["lr", "randomforest", "xgboost", "catboost", "lightgbm",
+          "mlp", "embedmlp", "mlpplr", "resnet", "ftt", "t2gformer", "saint", "tabpfn",
+          "tabr", "tabm", "ptarl", "modernnca"]  # 추가
 # (init_hp, deepens, hyperens)
 opts = [(True, 0, 0), #no HPO
         (False, 0, 0), #tuned
