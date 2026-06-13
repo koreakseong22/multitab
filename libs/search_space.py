@@ -253,7 +253,7 @@ def get_search_space(trial, modelname, num_features=None, data_id=None, metric=N
             "diversity_weight": trial.suggest_float('diversity_weight', 0.05, 1.0, log=True),
             "r_weight":         trial.suggest_float('r_weight', 0.05, 1.0, log=True),
             "weight_decay":     trial.suggest_float('weight_decay', 1e-6, 1e-3, log=True),
-            "max_epochs":            500 if data_id in large_set else 1000,
+            "max_epochs":            100,  # 다른 baseline(mlp/ftt/resnet 등)과 동일한 예산
             "early_stopping_rounds": 20,  # 원본 고정값 (patience=20)
         }
     elif modelname == "tabm":
@@ -363,7 +363,7 @@ def rearrange_params(modelname, data_id, params):
         params.setdefault("diversity_weight", 0.25)  # 원본 default
         params.setdefault("r_weight",         0.25)  # 원본 default
         params.setdefault("weight_decay", 1e-5)
-        params.setdefault("max_epochs", 500 if data_id in large_set else 1000)
+        params.setdefault("max_epochs", 100)
         params.setdefault("early_stopping_rounds", 20)
 
     # 5. TabM 보정
