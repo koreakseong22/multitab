@@ -230,25 +230,31 @@ def get_search_space(trial, modelname, num_features=None, data_id=None, metric=N
     elif modelname == "ptarl":
         # PTaRL: Prototype-based Tabular Representation Learning via Space Calibration
         # Hangting Ye et al., ICLR 2024 — https://arxiv.org/abs/2407.05364
+        # 원본 코드(HangtingYe/PTaRL: models.py, train_final_version.py) 구조에 충실한 버전.
+        #
+        #   - encoder: vanilla MLP (Linear-ReLU-Dropout) — d_hidden, n_blocks로 d_layers 구성
+        #   - lr: 1e-4 고정 (원본 하드코딩, 탐색하지 않음) → libs/ptarl.py에서 처리
+        #   - n_epochs: early stopping(patience=20)만으로 종료, max_epochs는 안전 상한
+        #   - ot_weight / diversity_weight / r_weight: 원본처럼 3개 독립 가중치
+        #     (원본 default=0.25, 여기서는 Optuna로 각각 탐색)
+        #   - n_clusters = ceil(log2(n_num+n_cat)) — libs/ptarl.py에서 자동 계산 (탐색 X)
         large_set = [
             44059, 44131, 40685, 45548, 41169, 41162, 42345, 41168, 40922, 23512, 40672,
             44161, 41150, 1509, 44057, 43928, 44069, 1503, 44068, 44159, 1113, 44027,
             1169, 150, 44065, 44129, 1567,
         ]
         params = {
-            "d_hidden":     trial.suggest_categorical('d_hidden', [64, 128])
-                            if data_id in large_set
-                            else trial.suggest_categorical('d_hidden', [64, 128, 256]),
-            "n_blocks":     0 if data_id in large_set else trial.suggest_int('n_blocks', 0, 3),
-            "dropout":      trial.suggest_float('dropout', 0.0, 0.5, step=0.05),
-            "lambda_div":   trial.suggest_float('lambda_div',  1e-2, 1.0, log=True),
-            "lambda_orth":  trial.suggest_float('lambda_orth', 1e-2, 1.0, log=True),
-            "lr":           trial.suggest_float('lr',           1e-4, 1e-2, log=True),
-            "lr_s2":        trial.suggest_float('lr_s2',        1e-4, 1e-2, log=True),
-            "weight_decay": trial.suggest_float('weight_decay', 1e-6, 1e-2, log=True),
-            "stage1_epochs":         50,   # 원본 논문 고정값
-            "stage2_epochs":         50,   # 원본 논문 고정값
-            "early_stopping_rounds": 20,
+            "d_hidden":         trial.suggest_categorical('d_hidden', [64, 128])
+                                if data_id in large_set
+                                else trial.suggest_categorical('d_hidden', [64, 128, 256]),
+            "n_blocks":         trial.suggest_int('n_blocks', 1, 4),
+            "dropout":          trial.suggest_float('dropout', 0.0, 0.5, step=0.05),
+            "ot_weight":        trial.suggest_float('ot_weight', 0.05, 1.0, log=True),
+            "diversity_weight": trial.suggest_float('diversity_weight', 0.05, 1.0, log=True),
+            "r_weight":         trial.suggest_float('r_weight', 0.05, 1.0, log=True),
+            "weight_decay":     trial.suggest_float('weight_decay', 1e-6, 1e-3, log=True),
+            "max_epochs":            500 if data_id in large_set else 1000,
+            "early_stopping_rounds": 20,  # 원본 고정값 (patience=20)
         }
     elif modelname == "tabm":
         # TabM: Advancing Tabular Deep Learning With Parameter-Efficient Ensembling
@@ -345,12 +351,20 @@ def rearrange_params(modelname, data_id, params):
 
     # 4. PTaRL 보정
     elif modelname == "ptarl":
-        stage1 = params.get("stage1_epochs", 50)
-        params.setdefault("stage2_epochs",         100 - stage1)
+        large_set = [
+            44059, 44131, 40685, 45548, 41169, 41162, 42345, 41168, 40922, 23512, 40672,
+            44161, 41150, 1509, 44057, 43928, 44069, 1503, 44068, 44159, 1113, 44027,
+            1169, 150, 44065, 44129, 1567,
+        ]
+        params.setdefault("d_hidden",  128)
+        params.setdefault("n_blocks",  1)
+        params.setdefault("dropout",   0.1)
+        params.setdefault("ot_weight",        0.25)  # 원본 default
+        params.setdefault("diversity_weight", 0.25)  # 원본 default
+        params.setdefault("r_weight",         0.25)  # 원본 default
+        params.setdefault("weight_decay", 1e-5)
+        params.setdefault("max_epochs", 500 if data_id in large_set else 1000)
         params.setdefault("early_stopping_rounds", 20)
-        params.setdefault("lambda_div",            0.1)
-        params.setdefault("lambda_orth",           0.1)
-        params.setdefault("lr_s2",                 params.get("lr", 1e-3))
 
     # 5. TabM 보정
     elif modelname == "tabm":
@@ -378,19 +392,15 @@ def suggest_initial_trial(modelname):
         "saint": {"learning_rate": 0.0001, "weight_decay" : 0.01, "activation": "relu", "optimizer": "AdamW", "attn_dropout": 0.1, "ff_dropout": 0.8}, #SAINT
         "modernnca": {"n_blocks": 0, "weight_decay": 0.0002, "lr": 0.01},
         "tabr": {"d_main": 265, "encoder_n_blocks": 0, "predictor_n_blocks": 1},
-        # PTaRL 원논문 Appendix A 권장값
+        # PTaRL 원본 default (train_final_version.py 의 CLI default 와 동일: 모두 0.25)
         "ptarl": {
-            "d_hidden":              128,
-            "n_blocks":              1,
-            "dropout":               0.1,
-            "lambda_div":            0.1,
-            "lambda_orth":           0.1,
-            "lr":                    1e-3,
-            "lr_s2":                 1e-3,
-            "weight_decay":          1e-5,
-            "stage1_epochs":         50,
-            "stage2_epochs":         50,
-            "early_stopping_rounds": 20,
+            "d_hidden":         128,
+            "n_blocks":         1,
+            "dropout":          0.1,
+            "ot_weight":        0.25,
+            "diversity_weight": 0.25,
+            "r_weight":         0.25,
+            "weight_decay":     1e-5,
         },
         # TabM 논문 README default (lr=2e-3, weight_decay=3e-4, k=32)
         "tabm": {
