@@ -1,8 +1,8 @@
 # MultiTab requirements
-# Python 3.12 + CUDA 12.9 (RTX 5000 Ada) 환경 기준
+# Python 3.11/3.12 + CUDA 12.x 환경 기준
 #
 # 설치 방법:
-#   1) pip install torch --index-url https://download.pytorch.org/whl/cu128
+#   1) pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 #   2) pip install -r requirements.txt
 
 # ── HPO ────────────────────────────────────────────────────────────────────
@@ -30,6 +30,16 @@ tabpfn
 
 # ── TabM (libs/tabm_model.py 의존성) ───────────────────────────────────────
 tabm
+
+# ── TabR / ModernNCA 의존성 ─────────────────────────────────────────────────
+delu>=0.0.25
+
+# ── retrieval 가속 (TabR, ModernNCA) ───────────────────────────────────────
+# GPU 환경: faiss-gpu / CPU 환경 또는 CUDA 버전 미지원 시: faiss-cpu
+faiss-cpu
+
+# ── 통계 검정 (Wilcoxon, Friedman, Nemenyi, CD diagram) ────────────────────
+scikit-posthocs>=0.7.0
 
 # ── 기타 ────────────────────────────────────────────────────────────────────
 openml>=0.14.1
