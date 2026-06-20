@@ -28,7 +28,10 @@ parser.add_argument('--metric', type=str, default='l2', choices=['l2', 'l1', 'co
 # Parse the arguments
 args = parser.parse_args()
 
-os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
+# gpu_id로 물리적 GPU를 선택하고, PyTorch에서는 항상 cuda:0으로 접근
+# (CUDA_VISIBLE_DEVICES가 외부에서 이미 설정된 경우 그것을 우선 사용)
+if "CUDA_VISIBLE_DEVICES" not in os.environ and args.gpu_id >= 0:
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
 # Load dataset information from a JSON file
 with open(f'dataset_id.json', 'r') as file:
     data_info = json.load(file)
@@ -68,7 +71,8 @@ if train:
     if args.gpu_id == -1:
         device = torch.device('cpu')
     else:
-        device = torch.device(f'cuda:{args.gpu_id}' if torch.cuda.is_available() else 'cpu')
+        # CUDA_VISIBLE_DEVICES로 물리적 GPU가 이미 선택되어 있으므로 항상 cuda:0
+        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     import platform
     env_info = '{0}:{1}'.format(platform.node(), args.gpu_id)
     print(env_info, device)
