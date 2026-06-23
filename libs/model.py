@@ -9,7 +9,6 @@ from libs.tabpfn import tabpfn
 from libs.saint import main_saint
 from libs.modernnca import ModernNCAMethod
 from libs.tabr import TabRMethod
-from libs.ptarl import PTaRLMethod
 from libs.tabm import TabMMethod
 from libs.search_space import get_search_space
 
@@ -63,14 +62,10 @@ def getmodel(modelname, params, tasktype, dataset, openml_id, input_dim, output_
         model = ModernNCAMethod(params, tasktype, dataset.X_num, dataset.X_cat, input_dim=input_dim, output_dim=output_dim, device=device, data_id=openml_id)
     elif modelname == "modernnca":
         model = ModernNCAMethod(params, tasktype, dataset.X_num, dataset.X_cat, input_dim=input_dim, output_dim=1, device=device, data_id=openml_id)
-    elif (modelname == "tabr")  & (tasktype == "multiclass"):
+    elif (modelname == "tabr") & (tasktype == "multiclass"):
         model = TabRMethod(params, tasktype, dataset.X_num, dataset.X_cat, input_dim=input_dim, output_dim=output_dim, device=device, data_id=openml_id)
     elif modelname == "tabr":
         model = TabRMethod(params, tasktype, dataset.X_num, dataset.X_cat, input_dim=input_dim, output_dim=1, device=device, data_id=openml_id)
-    elif (modelname == "ptarl") & (tasktype == "multiclass"):
-        model = PTaRLMethod(params, tasktype, dataset.X_num, dataset.X_cat, input_dim=input_dim, output_dim=output_dim, device=device, data_id=openml_id)
-    elif modelname == "ptarl":
-        model = PTaRLMethod(params, tasktype, dataset.X_num, dataset.X_cat, input_dim=input_dim, output_dim=1, device=device, data_id=openml_id)
     elif (modelname == "tabm") & (tasktype == "multiclass"):
         model = TabMMethod(params, tasktype, dataset.X_num, dataset.X_cat, input_dim=input_dim, output_dim=output_dim, device=device, data_id=openml_id)
     elif modelname == "tabm":
@@ -119,10 +114,6 @@ def add_default_params(modelname, params, data_id=None):
         params["early_stopping_rounds"] = 20
         if data_id in [5, 1486, 1501, 20, 12, 41143, 44061, 1476, 41702, 41145, 41147, 422]:
             params["embedding_dim"] = 8
-    elif modelname == "ptarl":
-        # stage2_epochs = 100 - stage1_epochs 는 get_search_space에서 이미 계산됨.
-        # early_stopping_rounds도 이미 포함되어 있으므로 별도 update 불필요.
-        pass
     elif modelname == "tabm":
         # n_epochs, early_stopping_rounds 이미 get_search_space에 포함.
         pass
