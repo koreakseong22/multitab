@@ -76,7 +76,8 @@ opts = [(True, 0, 0), #no HPO
         (False, 0, 1), (False, 0, 2), (False, 0, 3), (False, 0, 4)] #hyper ensemble
 opt_dict = {"lr": [opts[0]], "tabpfn": [opts[0]],
             "randomforest": opts[:2], "xgboost": opts[:2], "catboost": opts[:2], "lightgbm": opts[:2],
-            "mlp": opts, "embedmlp": opts, "mlpplr": opts, "ftt": opts, "resnet": opts, "t2gformer": opts, "saint": opts}
+            "mlp": opts, "embedmlp": opts, "mlpplr": opts, "ftt": opts, "resnet": opts, "t2gformer": opts, "saint": opts,
+            "tabr": opts[:2], "tabm": opts[:2], "ptarl": opts[:2], "modernnca": opts[:2]} 
 
 # Set GPU environment variables
 os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)

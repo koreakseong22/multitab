@@ -16,6 +16,7 @@ results/
 .idea/
 
 optim_logs/
+reproduce_logs/
 *.pkl
 *.csv
 
