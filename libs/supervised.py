@@ -204,8 +204,12 @@ class supmodel(torch.nn.Module):
 
             if logit:
                 return logits.detach().cpu().numpy()
+            elif self.tasktype == "binclass":
+                # eval.py에서 prob=False(기본값)일 때 expit(sigmoid)를 추가로 적용하므로
+                # 여기서는 raw logit을 그대로 반환 (이중 적용 방지)
+                return logits.detach().cpu().numpy()
             else:
-                return torch.nn.functional.softmax(logits).detach().cpu().numpy()
+                return torch.nn.functional.softmax(logits, dim=1).detach().cpu().numpy()
     
     
     
