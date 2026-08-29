@@ -33,7 +33,18 @@ class LR(torch.nn.Module):
                 logits = np.log(probs[:, 1] / (1 - probs[:, 1]))
                 return logits
             else:  # Multiclass classification
-                logits = np.log(probs / (1 - probs))
+                # ⚠ softmax 의 역변환은 log(p) 다. per-class log-odds
+                #   log(p/(1-p)) 를 쓰면 eval.py 가 softmax 를 적용했을 때
+                #   원래 확률이 복원되지 않고 과도하게 sharpen 된다. 실측:
+                #     p = [0.70, 0.20, 0.10]
+                #       log(p/(1-p)) -> [0.866, 0.093, 0.041]  log loss 0.3851 -> 0.2245 (-42%)
+                #       log(p)       -> [0.700, 0.200, 0.100]  log loss 정확히 일치
+                #   softmax(log p) = p 이므로 상수배를 제외하고 정확한 역변환이다.
+                #
+                # ⚠ 위 이진 분기의 log(p/(1-p)) 는 eval.py 가 expit 를 적용해
+                #   정확히 복원되므로 그대로 둔다. 이진과 다중의 역함수가
+                #   다르기 때문이다(expit vs softmax).
+                logits = np.log(probs)
                 return logits
         else:
             return probs

@@ -283,30 +283,77 @@ def get_search_space(trial, modelname, num_features=None, data_id=None, metric=N
 
 
 def add_default_params(modelname, params, data_id):
+    """get_search_space() 가 리터럴로 넣는 값 중 best_params 에 남지 않는 것을 복원한다.
+
+    ⚠ trial.suggest_* 를 거치지 않고 dict 에 직접 써넣은 값은 study.best_params
+      에 없다. 여기서 되돌려 놓지 않으면 HPO 와 reproduce 가 서로 다른 조건으로
+      학습한다 -- optimize.py 는 n_estimators=300 으로 탐색했는데 reproduce.py 는
+      sklearn 기본값 100 으로 재학습하는 식이다.
+
+    ⚠ libs/model.py 에도 같은 이름의 함수가 있다. reproduce.py 는
+      `from libs.model import *` 다음에 `from libs.search_space import *` 를
+      하므로 **이 정의가 이긴다**. model.py 쪽의 randomforest / catboost 분기가
+      그래서 가려져 있었고, 두 모델이 조기종료도 없이 기본값으로 재학습되고
+      있었다.
+
+    ⚠ lr_scheduler 는 전 모델에서 trial.suggest_categorical 로 탐색되므로
+      best_params 에 남는다. 여기서 건드리면 안 된다.
+
+    [2026-08 감사] get_search_space() 의 리터럴 키를 자동 대조해 복원 누락을
+    확인했다. 누락되어 있던 것:
+        randomforest  n_estimators
+        catboost      iterations, early_stopping_rounds, verbose
+        t2gformer     token_bias
+        tabr          early_stopping_rounds
+        modernnca     early_stopping_rounds
+        xgboost       max_iterations (무해)
     """
-    이미 정의된 data_id 체계를 활용하여 기본 파라미터를 동적으로 추가합니다.
-    """
-    if modelname == "xgboost":
+    if modelname == "randomforest":
+        params.update({'n_estimators': 300})
+
+    elif modelname == "xgboost":
         params.update({
             'n_estimators': 10000,
+            'max_iterations': 10000,
             'early_stopping_rounds': 20,
-            'verbosity': 0
+            'verbosity': 0,
         })
+
+    elif modelname == "catboost":
+        params.update({
+            'iterations': 10000,
+            'early_stopping_rounds': 20,
+            'verbose': 0,
+        })
+
     elif modelname == "lightgbm":
         params.update({
             'iterations': 10000,
             'early_stopping_rounds': 20,
-            'verbosity': -1
+            'verbosity': -1,
         })
+
     elif modelname in ["mlp", "resnet", "ftt", "embedmlp", "mlpplr", "saint", "t2gformer"]:
-        # 데이터 크기에 따라 학습 횟수를 조절하는 소프트코딩
+        # ⚠ n_epochs 는 100 고정이다. get_search_space() 가 large_datalist 여부와
+        #   무관하게 100 을 쓰므로, 여기서만 50 으로 줄이면 large_datalist
+        #   데이터셋에서 HPO(100 epoch)와 reproduce(50 epoch)가 어긋난다.
         params.update({
-            'n_epochs': 50 if data_id in large_datalist else 100,
-            'early_stopping_rounds': 20
+            'n_epochs': 100,
+            'early_stopping_rounds': 20,
         })
+        if modelname == "t2gformer":
+            params.setdefault('token_bias', True)
+
+    elif modelname in ["tabr", "modernnca"]:
+        # 두 모델 모두 get_search_space 에서 early_stopping_rounds 를 리터럴 20 으로
+        # 넣는다. tabr 의 n_heads / activation 과 model 하위 dict 의 고정값은
+        # rearrange_params 가 처리하므로 여기서 중복 설정하지 않는다.
+        params.setdefault('early_stopping_rounds', 20)
+
     elif modelname in ["ptarl", "tabm"]:
-        # 모든 필요 파라미터가 get_search_space에 포함되어 있음
+        # rearrange_params 가 처리한다
         pass
+
     return params
 
 

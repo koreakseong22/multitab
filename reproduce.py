@@ -1,4 +1,3 @@
-
 ## Main file for reproducing performance with the optimal configuration for a given set of [algorithm, dataset, preprocessing method].
 ## Paper info: MultiTab: A Comprehensive Benchmark Suite with Multi-Dimensional Analysis in Tabular Domains
 ## Contact author: Kyungeun Lee (kyungeun.lee@lgresearch.ai)
@@ -33,10 +32,16 @@ def is_study_todo(study, tasktype, optimal_value=1.0, num_trials=100):
 error_fname = "error.log"
 errors = pd.DataFrame(columns=("seed", "data", "model"))
 i = 0
-with open(error_fname, "r") as file:
+# ⚠ 원본은 try 없이 열어서 error.log 가 없으면 모듈 로드 단계에서 죽는다.
+#   이 파일은 "HPO 가 실패했던 조합"을 스킵하기 위한 것이므로, 없으면
+#   스킵할 조합이 없다는 뜻이고 그대로 진행하면 된다.
+try:
+    _ef = open(error_fname, "r")
+except FileNotFoundError:
+    _ef = None
+if _ef is not None:
+  with _ef as file:
     for line in file:
-        # l = line.split("optim_logs/")[-1]
-        # seed = l.split("seed=")[-1].split("/")[0]
         l = line.split(f"optim_logs{os.sep}")[-1]
         seed = l.split("seed=")[-1].split(os.sep)[0]
         data = l.split("data=")[-1].split("..")[0]
@@ -66,18 +71,28 @@ directory = os.path.join(args.savepath, 'reproduce_logs', f'seed={args.seed}', f
 if not os.path.exists(directory):
     os.makedirs(directory)
 
-models = ["lr", "randomforest", "xgboost", "catboost", "lightgbm",
-          "mlp", "embedmlp", "mlpplr", "resnet", "ftt", "t2gformer", "saint", "tabpfn",
-          "tabr", "tabm", "ptarl", "modernnca"]  # 추가
+# MultiTab 논문 Table 2 의 13개 모델. 아래는 의도적으로 제외한다:
+#   lr, tabpfn : 비교 대상이 아니다. tabpfn 은 X_train>3000 에서 sys.exit() 로
+#                프로세스를 죽여 뒤따르는 모델까지 못 돌게 만든다.
+#   ptarl      : 논문에 없는 추가 모델이고 HPO 도 불완전하다.
+#   tabm       : 논문에 없는 추가 모델. MultiTab 프로토콜에 맞춰 튜닝된 상태가
+#                아니므로 벤치마크 비교표에서 뺀다.
+models = ["randomforest", "xgboost", "catboost", "lightgbm",
+          "mlp", "embedmlp", "mlpplr", "resnet",
+          "ftt", "t2gformer", "saint", "tabr", "modernnca"]
+
 # (init_hp, deepens, hyperens)
 opts = [(True, 0, 0), #no HPO
         (False, 0, 0), #tuned
         (False, 1, 0), (False, 2, 0), (False, 3, 0), (False, 4, 0), #deep ensemble
         (False, 0, 1), (False, 0, 2), (False, 0, 3), (False, 0, 4)] #hyper ensemble
-opt_dict = {"lr": [opts[0]], "tabpfn": [opts[0]],
-            "randomforest": opts[:2], "xgboost": opts[:2], "catboost": opts[:2], "lightgbm": opts[:2],
-            "mlp": opts, "embedmlp": opts, "mlpplr": opts, "ftt": opts, "resnet": opts, "t2gformer": opts, "saint": opts,
-            "tabr": opts[:2], "tabm": opts[:2], "ptarl": opts[:2], "modernnca": opts[:2]} 
+
+# ⚠ tuned 하나만 쓴다. 논문 §3.3 은 "retrain the model using the best
+#   configuration found on that fold's validation split" 이고, deep/hyper
+#   ensemble 은 본 논문 분석(Table 2)에 등장하지 않는다.
+#   opts 전체를 돌리면 (dataset, seed) 당 88 회 학습이 되어 25 x 5 기준
+#   11,000 회가 된다. tuned 만이면 13 x 125 = 1,625 회다.
+opt_dict = {m: [opts[1]] for m in models}
 
 # Set GPU environment variables
 os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
@@ -103,9 +118,6 @@ for m in models:
         print(todo)
         print("##########################################")
         if todo:
-            if (m == "tabpfn") & (X_train.size(0) > 3000):
-                np.save(fname, "ValueError: Not implemented.")
-                sys.exit()
             
             params = {}
             if m not in ["tabpfn", "lr"]:
@@ -160,8 +172,10 @@ for m in models:
                 model.fit(X_train, y_train, X_val, y_val)
                 et = time.time()
             except ValueError:
+                # ⚠ 원본은 sys.exit() 였다. 한 모델의 학습 실패가 그
+                #   (dataset, seed) 의 남은 모델까지 전부 못 돌게 만든다.
                 np.save(fname, "ValueError: Not implemented.")
-                sys.exit()
+                continue
         
             # Model inference
             preds_test = model.predict(X_test)
