@@ -126,7 +126,32 @@ for m in models:
                     # opt_logs = joblib.load(os.path.join(args.savepath, f'optim_logs/seed={args.seed}/data={args.openml_id}..model={m}.pkl'))
                     opt_logs = joblib.load(os.path.join(args.savepath, 'optim_logs', f'seed={args.seed}', f'data={args.openml_id}..model={m}.pkl'))
                     not_complete = is_study_todo(opt_logs, tasktype)
-                    assert not_complete == False
+                    if not_complete:
+                        # ⚠ 원본은 `assert not_complete == False` 였다. HPO 가
+                        #   미완료로 판정되면 AssertionError 로 프로세스가 죽어
+                        #   그 (dataset, seed) 의 **남은 모델까지 전부** 못 돈다.
+                        #   실측: 대형 데이터셋 6개 x 5 seed = 30 건이 통째로
+                        #   0/13 이 되어 reproduce_logs 가 1207/1625 에서 멈췄다.
+                        #
+                        #   is_study_todo 는 best_value >= 1.0 이거나 completed
+                        #   == 100 일 때만 완료로 본다. 그래서 아래 두 경우가
+                        #   모두 미완료로 잡힌다:
+                        #     (a) HPO 를 아직 안 채운 조합 (대형 데이터셋의
+                        #         tabr / saint / t2gformer 등) -- 정상적인 skip
+                        #     (b) val_acc 1.0 도달로 조기종료됐지만 best_value 가
+                        #         0.9999.. 인 런 -- 이건 사실 완료된 것이다
+                        #   (b) 를 구분하려면 completed 수를 봐야 하므로 이유를
+                        #   출력한다. completed=100 인데 여기 걸리면 판정 자체가
+                        #   잘못된 것이니 is_study_todo 를 손봐야 한다.
+                        _done = [t for t in opt_logs.trials
+                                 if t.state == optuna.trial.TrialState.COMPLETE]
+                        try:
+                            _bv = f"{opt_logs.best_value:.6f}"
+                        except Exception:
+                            _bv = "n/a"
+                        print(f"  !  HPO incomplete: model={m} "
+                              f"completed={len(_done)} best_value={_bv} -> skip")
+                        continue
                 except FileNotFoundError:
                     if len(errors[(errors["seed"] == str(args.seed)) & (errors["model"] == m) & (errors["data"] == str(args.openml_id))]) > 0:
                         np.save(fname, "ValueError: Not implemented.")
@@ -142,7 +167,8 @@ for m in models:
                     if len(completed_trials) <= ensemble_hyper:
                         np.save(fname, "ValueError: Not implemented.")
                         continue
-                    assert len(completed_trials) > ensemble_hyper
+                    # (원본의 assert 제거 - 위 if 로 이미 보장된다. opt_dict 가
+                    #  tuned 만 쓰므로 이 분기 자체에 도달하지 않는다.)
                     if tasktype == "regression":
                         sorted_trials = sorted(completed_trials, key=lambda x: x.value)
                     else:
@@ -156,9 +182,16 @@ for m in models:
             params = rearrange_params(m, args.openml_id, params)
             
             # Check for class imbalance problems in multiclass tasks with specific models
+            #
+            # ⚠ 원본은 여기서 `raise ValueError` 를 했다. 이 줄은 try 블록 밖이라
+            #   잡히지 않고 프로세스를 죽인다. GBDT 3개 중 하나만 걸려도 그
+            #   (dataset, seed) 의 남은 모델이 전부 못 돈다. 아래 fit 의
+            #   except ValueError 와 동일하게 파일을 남기고 넘어간다.
             if (tasktype == "multiclass") & (m in ["catboost", "xgboost", "lightgbm"]):
-                if y_train.size(1) != y_train.unique(dim=1).size(1):            
-                    raise ValueError # "Unknown class problem" --- Inherent challenges in GBDTs
+                if y_train.size(1) != y_train.unique(dim=1).size(1):
+                    print(f"  !  unknown-class problem (GBDT 고유 제약): model={m} -> skip")
+                    np.save(fname, "ValueError: Not implemented.")
+                    continue
             
             # Define and train the model
             output_dim = y_train.shape[1] if tasktype == "multiclass" else 1
