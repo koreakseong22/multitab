@@ -304,8 +304,10 @@ def add_default_params(modelname, params, data_id):
         randomforest  n_estimators
         catboost      iterations, early_stopping_rounds, verbose
         t2gformer     token_bias
-        tabr          early_stopping_rounds
-        modernnca     early_stopping_rounds
+        tabr          model 중첩 구조 전체 + lr / weight_decay /
+                      early_stopping_rounds(10) / lr_scheduler
+        modernnca     model 중첩 구조 전체 + early_stopping_rounds(20)
+                      (두 모델은 rearrange_params 가 처리한다)
         xgboost       max_iterations (무해)
     """
     if modelname == "randomforest":
@@ -345,10 +347,11 @@ def add_default_params(modelname, params, data_id):
             params.setdefault('token_bias', True)
 
     elif modelname in ["tabr", "modernnca"]:
-        # 두 모델 모두 get_search_space 에서 early_stopping_rounds 를 리터럴 20 으로
-        # 넣는다. tabr 의 n_heads / activation 과 model 하위 dict 의 고정값은
-        # rearrange_params 가 처리하므로 여기서 중복 설정하지 않는다.
-        params.setdefault('early_stopping_rounds', 20)
+        # ⚠ 이 두 모델은 params["model"] 중첩 구조와 최상위 리터럴을 함께
+        #   복원해야 하므로 **전부 rearrange_params 가 처리한다**. 여기서
+        #   early_stopping_rounds 를 건드리면 값이 어긋난다:
+        #   get_search_space 기준으로 tabr 은 10, modernnca 는 20 이다.
+        pass
 
     elif modelname in ["ptarl", "tabm"]:
         # rearrange_params 가 처리한다
@@ -387,15 +390,73 @@ def rearrange_params(modelname, data_id, params):
         else:
             params.setdefault("embedding_dim", 32) # 기본값 보장
 
-    # 3. TabR & ModernNCA 보정 (d_multiplier 등 고정값)
-    elif modelname == "tabr":
-        params.setdefault("model", {})
-        if isinstance(params["model"], dict):
-            params["model"].setdefault("d_multiplier", 2.0)
-            params["model"].setdefault("mixer_normalization", "auto")
-            params["model"].setdefault("dropout1", 0.0)
-            params["model"].setdefault("normalization", "LayerNorm")
-            params["model"].setdefault("activation", "ReLU")
+    # 3. TabR & ModernNCA 보정
+    elif modelname in ("tabr", "modernnca"):
+        # ⚠ 이 두 모델의 get_search_space() 는 중첩 dict 를 만든다:
+        #       params["model"]["d_main"]  /  params["model"]["num_embeddings"][...]
+        #   그런데 Optuna 의 study.best_params 는 **평탄한** dict 다.
+        #   trial.suggest_int('d_main', ...) 로 등록된 "이름"만 남기 때문에
+        #   reproduce 시점의 params 는
+        #       {'d_main': 200, 'context_dropout': 0.3, 'd_embedding': 32, ...}
+        #   이고 params["model"] 키가 아예 없다.
+        #
+        #   이전 버전은 params["model"] 을 새로 만들고 d_multiplier 등 고정값만
+        #   넣었기 때문에, 탐색된 d_main / encoder_n_blocks / ... 가 최상위에
+        #   남아 model 하위로 들어가지 못했다. 그 결과 tabr.py 의
+        #   filtered_params 가 비어
+        #       TypeError: TabR.__init__() missing 5 required keyword-only
+        #                  arguments: 'd_main', 'encoder_n_blocks', ...
+        #   가 발생했다. 여기서 평탄한 키를 다시 중첩 구조로 복원한다.
+        #
+        # ⚠ tabr 은 lr / weight_decay / early_stopping_rounds / lr_scheduler 까지
+        #   전부 리터럴이라 best_params 에 하나도 없다. modernnca 는 lr /
+        #   weight_decay / lr_scheduler 를 탐색하므로 남는다.
+        _MODEL_KEYS = {
+            "tabr":      ("d_main", "context_dropout", "encoder_n_blocks",
+                          "predictor_n_blocks", "dropout0", "lambda_w", "margin"),
+            "modernnca": ("d_block", "dim", "dropout", "n_blocks"),
+        }[modelname]
+        _EMB_KEYS = ("d_embedding", "frequency_scale", "n_frequencies")
+
+        mp = params.get("model")
+        if not isinstance(mp, dict):
+            mp = {}
+        for k in _MODEL_KEYS:
+            if k in params and k not in mp:
+                mp[k] = params.pop(k)
+
+        ne = mp.get("num_embeddings")
+        if not isinstance(ne, dict):
+            ne = {}
+        for k in _EMB_KEYS:
+            if k in params and k not in ne:
+                ne[k] = params.pop(k)
+
+        if modelname == "tabr":
+            # get_search_space 의 num_embeddings 블록: d_embedding 이 두 번
+            # 나오는데 뒤의 리터럴 64 가 앞의 suggest 결과를 덮는다. 실제로
+            # 학습에 쓰인 값은 64 이므로 그것을 따른다.
+            ne["d_embedding"] = 64
+            ne.setdefault("n_bins", 32)
+            mp.setdefault("d_multiplier", 2.0)
+            mp.setdefault("mixer_normalization", "auto")
+            mp.setdefault("dropout1", 0.0)
+            mp.setdefault("normalization", "LayerNorm")
+            mp.setdefault("activation", "ReLU")
+            mp.setdefault("feature_interaction", True)
+            mp.setdefault("metric", "l2")
+            # 최상위 리터럴 (best_params 에 없음)
+            params.setdefault("lr", 1e-4)
+            params.setdefault("weight_decay", 1e-5)
+            params.setdefault("lr_scheduler", True)
+            params["early_stopping_rounds"] = 10   # ⚠ tabr 만 10, 나머지는 20
+        else:  # modernnca
+            if "n_blocks" not in mp:
+                mp["n_blocks"] = 0     # large_set 에서는 탐색되지 않고 0 고정
+            params.setdefault("early_stopping_rounds", 20)
+
+        mp["num_embeddings"] = ne
+        params["model"] = mp
 
     # 4. PTaRL 보정
     elif modelname == "ptarl":
