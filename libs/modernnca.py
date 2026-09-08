@@ -281,19 +281,18 @@ class ModernNCAMethod(object, metaclass=abc.ABCMeta):
         self.N = X_train[:, self.num_cols]
         self.C = X_train[:, self.cat_features]
         if self.tasktype == "multiclass":
-            self.y = torch.argmax(y_train, dim=1).long()
+            self.y = torch.argmax(y_train, dim=1)
         else:
             self.y = y_train
 
         self.batch_size = get_batch_size(len(X_train))
 
         if self.tasktype == "regression":
-            self.criterion = F.mse_loss
+            self.criterion = F.mse_loss 
         elif self.tasktype == "multiclass":
-            self.criterion = F.nll_loss  # forward()가 이미 log(prob)를 출력하므로 nll_loss 사용
+            self.criterion = F.nll_loss
         else:
-            self.criterion = lambda pred, y: F.binary_cross_entropy(  # 수치 오차로 [0,1] 범위를 벗어나는 경우 방지
-                pred.clamp(1e-7, 1 - 1e-7), y)
+            self.criterion = lambda pred, target: F.binary_cross_entropy(pred.clamp(0.0, 1.0), target)
             
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(), 
@@ -302,7 +301,7 @@ class ModernNCAMethod(object, metaclass=abc.ABCMeta):
         )
         
         if self.params["lr_scheduler"] & (len(X_train) > self.batch_size):
-            self.scheduler = CosineAnnealingLR_Warmup(self.optimizer, warmup_epochs=10, T_max=100, iter_per_epoch=len(X_train)//self.batch_size, 
+            self.scheduler = CosineAnnealingLR_Warmup(self.optimizer, warmup_epochs=10, T_max=100, iter_per_epoch=(len(X_train) + self.batch_size - 1)//self.batch_size, 
                                                       base_lr=self.params['lr'], warmup_lr=1e-6, eta_min=0, last_epoch=-1)
             
         self.train_size = self.N.shape[0] if self.N is not None else self.C.shape[0]
@@ -376,7 +375,7 @@ class ModernNCAMethod(object, metaclass=abc.ABCMeta):
 
     def validate(self, epoch, X_val, y_val):
         if self.tasktype == "multiclass":
-            y_val = torch.argmax(y_val, dim=1).long()
+            y_val = torch.argmax(y_val, dim=1)
         else:
             y_val = y_val
             
@@ -392,7 +391,7 @@ class ModernNCAMethod(object, metaclass=abc.ABCMeta):
                 candidate_y = candidate_y.float()
 
             logits = []
-            iters = X_val.shape[0] // 10000 + 1
+            iters = (X_val.shape[0] + 9999) // 10000
             for i in range(iters):
                 N = X_val[10000*i:10000*(i+1), self.num_cols]
                 C = X_val[10000*i:10000*(i+1), self.cat_features]
@@ -414,11 +413,11 @@ class ModernNCAMethod(object, metaclass=abc.ABCMeta):
                     x, candidate_x = torch.cat([X_num, X_cat], dim=1),torch.cat([candidate_x_num, candidate_x_cat], dim=1)
     
                 val_pred = self.model(
-                    x=x,
-                    y=None,
-                    candidate_x=candidate_x,
-                    candidate_y=candidate_y,
-                    is_train=False,
+                    x = x,
+                    y = None,
+                    candidate_x = candidate_x,
+                    candidate_y = candidate_y,
+                    is_train = False,
                 ).squeeze(-1)
 
                 # if self.tasktype == "binclass":
@@ -447,7 +446,7 @@ class ModernNCAMethod(object, metaclass=abc.ABCMeta):
                 candidate_y = candidate_y.float()
 
             logits = []
-            iters = X_test.shape[0] // 10000 + 1
+            iters = (X_test.shape[0] + 9999) // 10000
             for i in range(iters):
                 N = X_test[10000*i:10000*(i+1), self.num_cols]
                 C = X_test[10000*i:10000*(i+1), self.cat_features]
@@ -469,11 +468,11 @@ class ModernNCAMethod(object, metaclass=abc.ABCMeta):
                     x, candidate_x = torch.cat([X_num, X_cat], dim=1),torch.cat([candidate_x_num, candidate_x_cat], dim=1)
     
                 val_pred = self.model(
-                    x=x,
-                    y=None,
-                    candidate_x=candidate_x,
-                    candidate_y=candidate_y,
-                    is_train=False,
+                    x = x,
+                    y = None,
+                    candidate_x = candidate_x,
+                    candidate_y = candidate_y,
+                    is_train = False,
                 ).squeeze(-1)
 
                 # if self.tasktype == "binclass":
@@ -502,7 +501,7 @@ class ModernNCAMethod(object, metaclass=abc.ABCMeta):
                 candidate_y = candidate_y.float()
 
             logits = []
-            iters = X_test.shape[0] // 10000 + 1
+            iters = (X_test.shape[0] + 9999) // 10000
             for i in range(iters):
                 N = X_test[10000*i:10000*(i+1), self.num_cols]
                 C = X_test[10000*i:10000*(i+1), self.cat_features]
@@ -524,11 +523,11 @@ class ModernNCAMethod(object, metaclass=abc.ABCMeta):
                     x, candidate_x = torch.cat([X_num, X_cat], dim=1),torch.cat([candidate_x_num, candidate_x_cat], dim=1)
     
                 val_pred = self.model(
-                    x=x,
-                    y=None,
-                    candidate_x=candidate_x,
-                    candidate_y=candidate_y,
-                    is_train=False,
+                    x = x,
+                    y = None,
+                    candidate_x = candidate_x,
+                    candidate_y = candidate_y,
+                    is_train = False,
                 ).squeeze(-1)
 
                 # if self.tasktype == "binclass":
@@ -539,16 +538,7 @@ class ModernNCAMethod(object, metaclass=abc.ABCMeta):
             logits = torch.concatenate(logits, dim=0)
 
         if logit:
-            # 주의: ModernNCA의 binclass 출력은 raw logit이 아니라 이미 확률이다
-            # (forward가 이웃 label의 softmax 가중 평균을 반환).
-            # reproduce.py/ensemble.py가 이 관행에 맞춰져 있으므로 그대로 반환.
-            return logits.detach().cpu().numpy()
-        elif self.is_binclass:
-            # binclass 1-D 출력에 softmax(dim=-1)를 쓰면 표본 축으로 정규화되어
-            # 무의미해진다. eval.py가 prob=False일 때 expit을 1회 적용하므로,
-            # 확률 p를 log-odds로 변환해 반환하면 expit(log-odds) == p 로 복원된다.
-            p = torch.clamp(logits, 1e-7, 1 - 1e-7)
-            return torch.log(p / (1 - p)).detach().cpu().numpy()
+            return (logits.clamp(0.0, 1.0) if self.is_binclass else logits).detach().cpu().numpy()
         else:
-            return torch.nn.functional.softmax(logits, dim=-1).detach().cpu().numpy()
-    
+            probabilities = logits.clamp(0.0, 1.0) if self.is_binclass else torch.nn.functional.softmax(logits, dim=-1)
+            return probabilities.detach().cpu().numpy()

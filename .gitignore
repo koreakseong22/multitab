@@ -21,3 +21,4 @@ reproduce_logs/
 *.csv
 
 .DS_Store
+*.md

@@ -20,7 +20,7 @@ def get_batch_size(n):
     else:
         return 64
 
-def load_data(openml_id, tasktype=None):
+def load_data(openml_id):
     if openml_id == 999999:
         dataset = sklearn.datasets.fetch_california_housing()
         X = pd.DataFrame(dataset['data'])
@@ -32,18 +32,6 @@ def load_data(openml_id, tasktype=None):
         print(f'Dataset is loaded.. Data name: {dataset.name}, Target feature: class')
         X, y, categorical_indicator, attribute_names = dataset.get_data(
             target="class"
-        )
-    elif openml_id == 43454:
-        dataset = openml.datasets.get_dataset(openml_id)
-        print(f'Dataset is loaded.. Data name: {dataset.name}, Target feature: loan_status')
-        X, y, categorical_indicator, attribute_names = dataset.get_data(
-            target="loan_status"
-        )
-    elif openml_id == 43823:
-        dataset = openml.datasets.get_dataset(openml_id)
-        print(f'Dataset is loaded.. Data name: {dataset.name}, Target feature: Heart_Disease')
-        X, y, categorical_indicator, attribute_names = dataset.get_data(
-            target="Heart_Disease"
         )
     else:
         dataset = openml.datasets.get_dataset(openml_id)
@@ -68,18 +56,18 @@ def load_data(openml_id, tasktype=None):
     total_features = len(valid_cols)
     X = X[valid_cols]
     # 2. Exclude samples containing any NaN values in either inputs or labels
-    nan_idx = X.isna().any(axis=1)
+    nan_idx = X.isna().any(axis=1) | (y.isna().any(axis=1) if y.ndim == 2 else y.isna())
     X = X[~nan_idx].reset_index(drop=True)
     y = y[~nan_idx].reset_index(drop=True)
     
     # 3. convert categorical features into integers (but still they are categorical)
     cat_features = np.array(attribute_names)[categorical_indicator]
     cat_features = [c for c in cat_features if c in valid_cols]
-    for v in valid_cols:
+    for v in valid_cols.copy():
         if not v in cat_features:
             try:
                 X[v].astype(np.float32)
-            except ValueError:
+            except (ValueError, TypeError):
                 valid_cols.remove(v)
     X = X[valid_cols]
 
@@ -90,33 +78,15 @@ def load_data(openml_id, tasktype=None):
         colencoder = LabelEncoder()
         X[col] = colencoder.fit_transform(X[col])
     X = X.values
-    invalid_num_cols = []
     for col in num_cols:
         if X[:, col].dtype == np.object_:
-            try:
-                X[:, col] = X[:, col].astype(np.float32)
-            except (ValueError, TypeError):
-                invalid_num_cols.append(col)
-    if invalid_num_cols:
-        print(f"  [data.py] categorical_indicator 미반영 문자열 컬럼 제거: {invalid_num_cols}")
-        keep_mask = [i for i in range(X.shape[1]) if i not in invalid_num_cols]
-        X = X[:, keep_mask]
-        num_cols = [keep_mask.index(i) for i in num_cols if i not in invalid_num_cols]
-        cat_cols = [keep_mask.index(i) for i in cat_cols if i not in invalid_num_cols]
-    X = X.astype(np.float32)
+            X[:, col] = X[:, col].astype(np.float32)
 
-    y = y.values
-    # 분류 태스크만 LabelEncoder 적용 (TabZilla 기준 통일).
-    # 회귀 타깃에 적용하면 연속값이 0..k-1 순위 코드로 바뀌어 RMSE/R2가 무의미해진다.
-    if tasktype is None:
-        # tasktype을 모르면 공식 구현과 동일하게 dtype 기준으로만 인코딩
-        _y0 = np.asarray(y).ravel()[0]
-        encode_y = isinstance(_y0, (str, bool, np.bool_))
-    else:
-        encode_y = tasktype != "regression"
-    if encode_y:
+    X = X.astype(np.float32)
+    y = y.values.reshape(-1)
+    if isinstance(y[0], str) or isinstance(y[0], (bool, np.bool_)):
         labelencoder = LabelEncoder()
-        y = labelencoder.fit_transform(np.asarray(y).ravel())
+        y = labelencoder.fit_transform(y)
 
     print("full data size", X.shape)
     return X, y, cat_cols, cat_cardinality, num_cols
@@ -132,20 +102,17 @@ def split_data(X, y, tasktype, num_indices=[], seed=0, device='cuda'):
     
     if tasktype == "multiclass":
         y = one_hot(y)
+    elif tasktype == "binclass":
+        classes = np.unique(y)
+        if len(classes) != 2:
+            raise ValueError("binclass requires exactly two target classes")
+        if not np.array_equal(classes, [0, 1]):
+            y = LabelEncoder().fit_transform(y)
     
-    # 분류: StratifiedKFold (TabZilla 벤치마크 기준 통일)
-    #   기존 KFold는 클래스 비율을 보존하지 않아 희귀 클래스가 fold에서 누락되면
-    #   AUROC가 undefined(nan)가 되는 문제가 있음 (sklearn 공식 문서 권장 방식)
-    # 회귀: 연속 타깃은 층화가 불가능하므로 공식 구현과 동일하게 KFold 사용
-    #   (StratifiedKFold에 연속값을 넣으면 클래스당 표본 수 < n_splits 로 ValueError)
-    if tasktype == "regression":
-        kf = KFold(n_splits=10, shuffle=True, random_state=42)
-        fold_idx = list(kf.split(X))
-    else:
-        from sklearn.model_selection import StratifiedKFold
-        y_for_split = np.argmax(y, axis=1) if y.ndim > 1 else y
-        kf = StratifiedKFold(n_splits=10, shuffle=True, random_state=42)
-        fold_idx = list(kf.split(X, y_for_split))
+    if not 0 <= seed < 10:
+        raise ValueError("seed must be a fold index between 0 and 9")
+    kf = KFold(n_splits=10, shuffle=True, random_state=42)
+    fold_idx = list(kf.split(X))
     tr_idx, te_idx = fold_idx[seed]
     val_split_idx = (seed+1) % 10
     _, val_idx = fold_idx[val_split_idx]
@@ -168,39 +135,15 @@ def prep_data(X_train, X_val, X_test, y_train, y_val, y_test, num_indices=[], ta
     device = X_train.device
     if len(num_indices) > 0:
         quantile_transformer = QuantileTransformer(output_distribution='uniform', random_state=42)
-        X_train[:, num_indices] = torch.as_tensor(
-            quantile_transformer.fit_transform(X_train[:, num_indices].cpu().numpy()),
-            device=device,
-            dtype=X_train.dtype,
-        )
-        X_val[:, num_indices] = torch.as_tensor(
-            quantile_transformer.transform(X_val[:, num_indices].cpu().numpy()),
-            device=device,
-            dtype=X_val.dtype,
-        )
-        X_test[:, num_indices] = torch.as_tensor(
-            quantile_transformer.transform(X_test[:, num_indices].cpu().numpy()),
-            device=device,
-            dtype=X_test.dtype,
-        )
+        X_train[:, num_indices] = torch.tensor(quantile_transformer.fit_transform(X_train[:, num_indices].cpu().numpy()), device=device)
+        X_val[:, num_indices] = torch.tensor(quantile_transformer.transform(X_val[:, num_indices].cpu().numpy()), device=device)
+        X_test[:, num_indices] = torch.tensor(quantile_transformer.transform(X_test[:, num_indices].cpu().numpy()), device=device)
     if tasktype == "regression":
         standard_transformer = StandardScaler()
-        y_train = torch.as_tensor(
-            standard_transformer.fit_transform(y_train.reshape(-1, 1).cpu().numpy()).reshape(-1),
-            device=device,
-            dtype=y_train.dtype,
-        )
+        y_train = torch.tensor(standard_transformer.fit_transform(y_train.reshape(-1, 1).cpu().numpy()).reshape(-1), device=device)
         y_std = standard_transformer.scale_.item()
-        y_val = torch.as_tensor(
-            standard_transformer.transform(y_val.reshape(-1, 1).cpu().numpy()).reshape(-1),
-            device=device,
-            dtype=y_val.dtype,
-        )
-        y_test = torch.as_tensor(
-            standard_transformer.transform(y_test.reshape(-1, 1).cpu().numpy()).reshape(-1),
-            device=device,
-            dtype=y_test.dtype,
-        )
+        y_val = torch.tensor(standard_transformer.transform(y_val.reshape(-1, 1).cpu().numpy()).reshape(-1), device=device)
+        y_test = torch.tensor(standard_transformer.transform(y_test.reshape(-1, 1).cpu().numpy()).reshape(-1), device=device)
     else:
         y_std = 1.
     return (X_train, y_train), (X_val, y_val), (X_test, y_test), y_std
@@ -209,7 +152,7 @@ def prep_data(X_train, X_val, X_test, y_train, y_val, y_test, num_indices=[], ta
 class TabularDataset(torch.utils.data.Dataset):
     def __init__(self, openml_id, tasktype, device, seed=1):
         
-        X, y, self.X_cat, self.X_cat_cardinality, self.X_num = load_data(openml_id, tasktype=tasktype)
+        X, y, self.X_cat, self.X_cat_cardinality, self.X_num = load_data(openml_id)
         self.tasktype = tasktype
         
         (self.X_train, self.y_train), (self.X_val, self.y_val), (self.X_test, self.y_test), self.y_std = split_data(X, y, self.tasktype, num_indices=self.X_num, seed=seed, device=device)

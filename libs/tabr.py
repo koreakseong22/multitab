@@ -91,6 +91,12 @@ def make_random_batches(
 ) :
     permutation = torch.randperm(train_size, device=device)
     batches = permutation.split(batch_size)
+    # this function is borrowed from tabr
+    # Below, we check that we do not face this issue:
+    # https://github.com/pytorch/vision/issues/3816
+    # This is still noticeably faster than running randperm on CPU.
+    # UPDATE: after thousands of experiments, we faced the issue zero times,
+    # so maybe we should remove the assert.
     assert torch.equal(
         torch.arange(train_size, device=device), permutation.sort().values
     )
@@ -192,19 +198,20 @@ class TabR(nn.Module):
         self.cached_candidate_y = None
 
     def update_index(self):
-        """FAISS 인덱스를 CPU에서 생성하도록 강제 수정 (Windows/pip 환경용)"""
+        """Update FAISS search index once per epoch."""
         if self.cached_candidate_k is None or self.cached_candidate_y is None:
             return
-        
         d_main = self.cached_candidate_k.shape[1]
-        
         if self.search_index is None:
-            self.search_index = faiss.IndexFlatL2(d_main)
-        
+            if self.cached_candidate_k.is_cuda and hasattr(faiss, "StandardGpuResources"):
+                self._faiss_resources = faiss.StandardGpuResources()
+                cfg = faiss.GpuIndexFlatConfig()
+                cfg.device = self.cached_candidate_k.device.index
+                self.search_index = faiss.GpuIndexFlatL2(self._faiss_resources, d_main, cfg)
+            else:
+                self.search_index = faiss.IndexFlatL2(d_main)
         self.search_index.reset()
-        
-        vectors = self.cached_candidate_k.to(torch.float32).detach().cpu().numpy()
-        self.search_index.add(vectors)
+        self.search_index.add(self.cached_candidate_k.to(torch.float32).detach().cpu().numpy())
 
     def reset_parameters(self):
         if isinstance(self.label_encoder, nn.Linear):
@@ -242,6 +249,7 @@ class TabR(nn.Module):
         candidate_y: Tensor,
         context_size: int,
         is_train: bool,
+        query_indices: Optional[Tensor] = None,
     ) -> Tensor:
 
         device = x_num.device if x_num is not None else x_cat.device
@@ -261,25 +269,28 @@ class TabR(nn.Module):
                 self.cached_candidate_y = candidate_y
 
         x, k = self._encode(x_num, x_cat)
-        if is_train:
-            assert y is not None
-            candidate_k = torch.cat([k, self.cached_candidate_k])
-            candidate_y = torch.cat([y, self.cached_candidate_y])
-        else:
-            candidate_k = self.cached_candidate_k
-            candidate_y = self.cached_candidate_y
+        candidate_k = self.cached_candidate_k
+        candidate_y = self.cached_candidate_y
+        if is_train and query_indices is None:
+            raise ValueError("Training retrieval requires global query indices")
+        if self.search_index is None:
+            self.update_index()
 
         batch_size, d_main = k.shape
 
         with torch.no_grad():
+            n_candidates = len(candidate_k)
+            context_size = min(context_size, n_candidates - (1 if is_train else 0))
+            if context_size < 1:
+                raise ValueError("TabR requires at least one non-self candidate")
             distances, context_idx = self.search_index.search(
                 k.to(torch.float32).detach().cpu().numpy(), context_size + (1 if is_train else 0)
             )
             distances = torch.tensor(distances, device=device)
             context_idx = torch.tensor(context_idx, device=device)
             if is_train:
-                distances[context_idx == torch.arange(batch_size, device=device)[:, None]] = torch.inf
-                context_idx = context_idx.gather(-1, distances.argsort()[:, :-1])
+                distances[context_idx == query_indices[:, None]] = torch.inf
+                context_idx = context_idx.gather(-1, distances.argsort()[:, :context_size])
 
         context_k = candidate_k[context_idx]
 
@@ -328,35 +339,11 @@ class TabRMethod(object, metaclass=abc.ABCMeta):
         self.train_step = 0
         self.context_size = 96
 
-        m_params = params["model"].copy()
-
-        # search_space.py / rearrange_params 는 num_embeddings 관련 값을
-        # params["model"]["num_embeddings"] 중첩 dict 로 전달한다.
-        # (이전 코드는 최상위에서 찾다가 전부 miss 하여 항상 하드코딩된
-        #  기본값 48/0.01/128 로 학습되는 버그가 있었다)
-        ne = m_params.get('num_embeddings')
-        if not isinstance(ne, dict):
-            ne = {}
-        num_embeddings_params = {
-            'n_frequencies': ne.get('n_frequencies', 48),
-            'frequency_scale': ne.get('frequency_scale', 0.01),
-            'd_embedding': ne.get('d_embedding', 64),
-        }
-
-        tabr_valid_keys = {
-            'd_main', 'd_multiplier', 'encoder_n_blocks', 'predictor_n_blocks',
-            'mixer_normalization', 'context_dropout', 'dropout0', 'dropout1',
-            'normalization', 'activation', 'memory_efficient', 'candidate_encoding_batch_size'
-        }
-        
-        filtered_params = {k: v for k, v in m_params.items() if k in tabr_valid_keys}
-
         self.model = TabR(
             n_num_features = self.n_num_features,
             n_cat_features = self.n_cat_features,
             n_classes = output_dim,
-            num_embeddings = num_embeddings_params,
-            **filtered_params
+            **params["model"]
         ).to(device)
         self.model.float()
 
@@ -398,7 +385,7 @@ class TabRMethod(object, metaclass=abc.ABCMeta):
         )
         
         if self.params["lr_scheduler"] & (len(X_train) > self.batch_size):
-            self.scheduler = CosineAnnealingLR_Warmup(self.optimizer, warmup_epochs=10, T_max=100, iter_per_epoch=len(X_train)//self.batch_size, 
+            self.scheduler = CosineAnnealingLR_Warmup(self.optimizer, warmup_epochs=10, T_max=100, iter_per_epoch=(len(X_train) + self.batch_size - 1)//self.batch_size, 
                                                       base_lr=self.params['lr'], warmup_lr=1e-6, eta_min=0, last_epoch=-1)
             
         self.train_size = self.N.shape[0] if self.N is not None else self.C.shape[0]
@@ -419,13 +406,12 @@ class TabRMethod(object, metaclass=abc.ABCMeta):
         self.model.train()
         tl = Averager()
 
-        if self.model.cached_candidate_k is None:
-            candidate_x_num = self.N[:50000].float().to(self.device) if self.N is not None else None
-            candidate_x_cat = self.C[:50000].float().to(self.device) if self.C is not None else None
-            candidate_y = self.y[:50000].float().to(self.device) if self.is_regression else self.y[:50000].to(self.device)
-            with torch.no_grad():
-                self.model.cached_candidate_k = self.model._encode(candidate_x_num, candidate_x_cat)[1]
-                self.model.cached_candidate_y = candidate_y
+        candidate_x_num = self.N[:50000].float().to(self.device) if self.N is not None else None
+        candidate_x_cat = self.C[:50000].float().to(self.device) if self.C is not None else None
+        candidate_y = self.y[:50000].float().to(self.device) if self.is_regression else self.y[:50000].to(self.device)
+        with torch.no_grad():
+            self.model.cached_candidate_k = self.model._encode(candidate_x_num, candidate_x_cat)[1]
+            self.model.cached_candidate_y = candidate_y
 
         self.model.update_index()
 
@@ -464,6 +450,7 @@ class TabRMethod(object, metaclass=abc.ABCMeta):
                     candidate_y=candidate_y,
                     context_size=self.context_size,
                     is_train=True,
+                    query_indices=batch_idx,
                 ).squeeze(-1)
 
                 loss = self.criterion(pred, y)
@@ -496,9 +483,12 @@ class TabRMethod(object, metaclass=abc.ABCMeta):
             candidate_x_cat = candidate_x_cat.float() if candidate_x_cat is not None else None
             if self.is_regression:
                 candidate_y = candidate_y.float()
+            self.model.cached_candidate_k = self.model._encode(candidate_x_num, candidate_x_cat)[1]
+            self.model.cached_candidate_y = candidate_y
+            self.model.update_index()
 
             logits = []
-            iters = X_val.shape[0] // 10000 + 1
+            iters = (X_val.shape[0] + 9999) // 10000
             for i in range(iters):
                 N = X_val[10000*i:10000*(i+1), self.num_cols]
                 C = X_val[10000*i:10000*(i+1), self.cat_features]
@@ -549,9 +539,12 @@ class TabRMethod(object, metaclass=abc.ABCMeta):
             candidate_x_cat = candidate_x_cat.float() if candidate_x_cat is not None else None
             if self.is_regression:
                 candidate_y = candidate_y.float()
+            self.model.cached_candidate_k = self.model._encode(candidate_x_num, candidate_x_cat)[1]
+            self.model.cached_candidate_y = candidate_y
+            self.model.update_index()
 
             logits = []
-            iters = X_test.shape[0] // 10000 + 1
+            iters = (X_test.shape[0] + 9999) // 10000
             for i in range(iters):
                 N = X_test[10000*i:10000*(i+1), self.num_cols]
                 C = X_test[10000*i:10000*(i+1), self.cat_features]
@@ -602,9 +595,12 @@ class TabRMethod(object, metaclass=abc.ABCMeta):
             candidate_x_cat = candidate_x_cat.float() if candidate_x_cat is not None else None
             if self.is_regression:
                 candidate_y = candidate_y.float()
+            self.model.cached_candidate_k = self.model._encode(candidate_x_num, candidate_x_cat)[1]
+            self.model.cached_candidate_y = candidate_y
+            self.model.update_index()
 
             logits = []
-            iters = X_test.shape[0] // 10000 + 1
+            iters = (X_test.shape[0] + 9999) // 10000
             for i in range(iters):
                 N = X_test[10000*i:10000*(i+1), self.num_cols]
                 C = X_test[10000*i:10000*(i+1), self.cat_features]
@@ -640,10 +636,6 @@ class TabRMethod(object, metaclass=abc.ABCMeta):
 
         if logit:
             return logits.detach().cpu().numpy()
-        elif self.is_binclass:
-            # binclass 출력은 1-D logit 벡터: softmax(dim=-1)를 쓰면 표본 축으로
-            # 정규화되어 무의미해진다. eval.py가 prob=False일 때 expit을 1회
-            # 적용하므로 raw logit을 그대로 반환 (supervised.py와 동일 컨벤션)
-            return logits.detach().cpu().numpy()
         else:
-            return torch.nn.functional.softmax(logits, dim=-1).detach().cpu().numpy()
+            probabilities = torch.sigmoid(logits) if self.is_binclass else torch.nn.functional.softmax(logits, dim=-1)
+            return probabilities.detach().cpu().numpy()

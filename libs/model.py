@@ -9,7 +9,6 @@ from libs.tabpfn import tabpfn
 from libs.saint import main_saint
 from libs.modernnca import ModernNCAMethod
 from libs.tabr import TabRMethod
-from libs.tabm import TabMMethod
 from libs.search_space import get_search_space
 
 def getmodel(modelname, params, tasktype, dataset, openml_id, input_dim, output_dim, device):
@@ -62,14 +61,12 @@ def getmodel(modelname, params, tasktype, dataset, openml_id, input_dim, output_
         model = ModernNCAMethod(params, tasktype, dataset.X_num, dataset.X_cat, input_dim=input_dim, output_dim=output_dim, device=device, data_id=openml_id)
     elif modelname == "modernnca":
         model = ModernNCAMethod(params, tasktype, dataset.X_num, dataset.X_cat, input_dim=input_dim, output_dim=1, device=device, data_id=openml_id)
-    elif (modelname == "tabr") & (tasktype == "multiclass"):
+    elif (modelname == "tabr")  & (tasktype == "multiclass"):
         model = TabRMethod(params, tasktype, dataset.X_num, dataset.X_cat, input_dim=input_dim, output_dim=output_dim, device=device, data_id=openml_id)
     elif modelname == "tabr":
         model = TabRMethod(params, tasktype, dataset.X_num, dataset.X_cat, input_dim=input_dim, output_dim=1, device=device, data_id=openml_id)
-    elif (modelname == "tabm") & (tasktype == "multiclass"):
-        model = TabMMethod(params, tasktype, dataset.X_num, dataset.X_cat, input_dim=input_dim, output_dim=output_dim, device=device, data_id=openml_id)
-    elif modelname == "tabm":
-        model = TabMMethod(params, tasktype, dataset.X_num, dataset.X_cat, input_dim=input_dim, output_dim=1, device=device, data_id=openml_id)
+    else:
+        raise ValueError(f"Unknown model: {modelname}")
     return model
 
 def add_default_params(modelname, params, data_id=None):
@@ -78,15 +75,16 @@ def add_default_params(modelname, params, data_id=None):
     elif modelname == "xgboost":
         params["early_stopping_rounds"] = 20
         params["n_estimators"] = 10000
-        params["max_iterations"] = 10000
         params["verbosity"] = 0
+        if "enable_category" in params:
+            params["enable_categorical"] = params.pop("enable_category")
     elif modelname == "catboost":
         params["early_stopping_rounds"] = 20
         params["iterations"] = 10000
         params["verbose"] = 0
     elif modelname == "lightgbm":
         params["early_stopping_rounds"] = 20
-        params["iterations"] = 10000
+        params["n_estimators"] = 10000
         params["verbosity"] = -1
     elif modelname in ["mlp", "embedmlp", "mlpplr", "resnet"]:
         params["n_epochs"] = 100
@@ -110,11 +108,9 @@ def add_default_params(modelname, params, data_id=None):
         params["heads"] = 4 if data_id in large_datalist else 8
         params["hidden"] = 16
         params["attentiontype"] = "colrow"
+        params["cont_embeddings"] = "MLP"
         params["n_epochs"] = 100
         params["early_stopping_rounds"] = 20
         if data_id in [5, 1486, 1501, 20, 12, 41143, 44061, 1476, 41702, 41145, 41147, 422]:
             params["embedding_dim"] = 8
-    elif modelname == "tabm":
-        # n_epochs, early_stopping_rounds 이미 get_search_space에 포함.
-        pass
     return params

@@ -29,21 +29,10 @@ class LR(torch.nn.Module):
         if logit:
             # Prevent division by zero in logit calculation
             probs = np.clip(probs, 1e-9, 1 - 1e-9)
-            if probs.shape[1] == 2:  # Binary classification
+            if self.tasktype == "binclass":  # Binary classification
                 logits = np.log(probs[:, 1] / (1 - probs[:, 1]))
                 return logits
             else:  # Multiclass classification
-                # ⚠ softmax 의 역변환은 log(p) 다. per-class log-odds
-                #   log(p/(1-p)) 를 쓰면 eval.py 가 softmax 를 적용했을 때
-                #   원래 확률이 복원되지 않고 과도하게 sharpen 된다. 실측:
-                #     p = [0.70, 0.20, 0.10]
-                #       log(p/(1-p)) -> [0.866, 0.093, 0.041]  log loss 0.3851 -> 0.2245 (-42%)
-                #       log(p)       -> [0.700, 0.200, 0.100]  log loss 정확히 일치
-                #   softmax(log p) = p 이므로 상수배를 제외하고 정확한 역변환이다.
-                #
-                # ⚠ 위 이진 분기의 log(p/(1-p)) 는 eval.py 가 expit 를 적용해
-                #   정확히 복원되므로 그대로 둔다. 이진과 다중의 역함수가
-                #   다르기 때문이다(expit vs softmax).
                 logits = np.log(probs)
                 return logits
         else:
@@ -74,11 +63,10 @@ class KNN(torch.nn.Module):
             if logit:
                 # Prevent division by zero in logit calculation
                 probs = np.clip(probs, 1e-9, 1 - 1e-9)
-                if probs.shape[1] == 2:  # Binary classification
+                if self.tasktype == "binclass":  # Binary classification
                     logits = np.log(probs[:, 1] / (1 - probs[:, 1]))
                     return logits
                 else:  # Multiclass classification
-                    # softmax의 역변환은 log(p) (LR 클래스의 주석 참고)
                     logits = np.log(probs)
                     return logits
             else:
@@ -108,11 +96,10 @@ class DecisionTree(torch.nn.Module):
             if logit:
                 # Prevent division by zero in logit calculation
                 probs = np.clip(probs, 1e-9, 1 - 1e-9)
-                if probs.shape[1] == 2:  # Binary classification
+                if self.tasktype == "binclass":  # Binary classification
                     logits = np.log(probs[:, 1] / (1 - probs[:, 1]))
                     return logits
                 else:  # Multiclass classification
-                    # softmax의 역변환은 log(p) (LR 클래스의 주석 참고)
                     logits = np.log(probs)
                     return logits
             else:
@@ -126,9 +113,9 @@ class RandomForest(torch.nn.Module):
         self.params = params
         self.tasktype = tasktype
         if self.tasktype == "regression":
-            self.model = RandomForestRegressor(**params, n_jobs=-1)
+            self.model = RandomForestRegressor(**params)
         else:
-            self.model = RandomForestClassifier(**params, n_jobs=-1)
+            self.model = RandomForestClassifier(**params)
         
     def fit(self, X_train, y_train, X_val, y_val):
         if self.tasktype == "multiclass":
@@ -143,18 +130,15 @@ class RandomForest(torch.nn.Module):
         if logit:
             # Prevent division by zero in logit calculation
             probs = np.clip(probs, 1e-9, 1 - 1e-9)
-            if probs.shape[1] == 2:  # Binary classification
+            if self.tasktype == "binclass":  # Binary classification
                 logits = np.log(probs[:, 1] / (1 - probs[:, 1]))
                 return logits
             else:  # Multiclass classification
-                # softmax의 역변환은 log(p) (LR 클래스의 주석 참고).
-                # log(p/(1-p))를 쓰면 eval.py의 softmax가 원래 확률을 복원하지
-                # 못하고 과도하게 sharpen 되어 logloss/AUROC가 왜곡된다.
                 logits = np.log(probs)
                 return logits
         else:
             return probs
-
+    
 class CatBoost(torch.nn.Module):
     def __init__(self, params, tasktype, cat_features=[]):
         loss_fn = {"multiclass": "MultiClass", "binclass": "CrossEntropy", "regression": "RMSE"}
@@ -187,12 +171,8 @@ class CatBoost(torch.nn.Module):
         
     def predict(self, X_test):
         X_test = pd.DataFrame(X_test.cpu()).astype({k: 'int' for k in self.cat_features})
-        preds = self.model.predict(X_test)
-        # multiclass: CatBoost가 float 2D 또는 문자열로 반환하는 경우 정수 1D로 변환
-        if self.tasktype == "multiclass":
-            return np.array(preds).flatten().astype(int)
-        return preds
-
+        return np.asarray(self.model.predict(X_test)).reshape(-1)
+    
     def predict_proba(self, X_test, logit=False):
         X_test = pd.DataFrame(X_test.cpu()).astype({k: 'int' for k in self.cat_features})
         if logit:
@@ -229,11 +209,7 @@ class XGBoost(torch.nn.Module):
         
     def predict(self, X_test):
         X_test = pd.DataFrame(X_test.cpu()).astype({k: 'int' for k in self.cat_features})
-        preds = self.model.predict(X_test)
-        # multiclass: XGBoost multi:softmax가 float로 반환하는 경우 정수 1D로 변환
-        if self.tasktype == "multiclass":
-            return np.array(preds).flatten().astype(int)
-        return preds
+        return np.asarray(self.model.predict(X_test)).reshape(-1)
     
     def predict_proba(self, X_test, logit=False):
         X_test = pd.DataFrame(X_test.cpu()).astype({k: 'int' for k in self.cat_features})
@@ -270,7 +246,7 @@ class LightGBM(torch.nn.Module):
         
     def predict(self, X_test):
         X_test = pd.DataFrame(X_test.cpu()).astype({k: 'category' for k in self.cat_features})
-        return self.model.predict(X_test)
+        return np.asarray(self.model.predict(X_test)).reshape(-1)
     
     def predict_proba(self, X_test, logit=False):
         X_test = pd.DataFrame(X_test.cpu()).astype({k: 'category' for k in self.cat_features})
