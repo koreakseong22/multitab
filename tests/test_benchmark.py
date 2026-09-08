@@ -232,14 +232,14 @@ class BenchmarkTests(unittest.TestCase):
                 with patch.object(sys, 'argv', argv), patch.object(optimize, 'TabularDataset', side_effect=AssertionError('completed study must not retrain')), patch.object(optimize.json, 'load', return_value=info), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                     optimize.main()
                 self.assertTrue(csv_log.exists())
-                argv = ['reproduce.py', '--gpu_id', '-1', '--openml_id', '10', '--seed', '1', '--savepath', directory, '--models', 'mlp']
+                argv = ['reproduce.py', '--gpu_id', '-1', '--openml_id', '10', '--seed', '1', '--savepath', directory, '--models', 'mlp', '--mode', 'best']
                 with patch.object(sys, 'argv', argv), patch.object(reproduce, 'TabularDataset', return_value=dataset), patch.object(reproduce, 'getmodel', return_value=PerfectClassifier()), patch.object(reproduce.json, 'load', return_value=info), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                     reproduce.main()
                 output = Path(directory) / 'reproduce_logs/seed=1/data=10/model=mlp..init_hps=False..deep=0..hyper=0.npy'
                 prediction = np.load(output, allow_pickle=True).item()
                 self.assertAlmostEqual(prediction['Performance']['logloss_test'], -np.log(.9))
                 self.assertEqual(prediction['implementation_id'], implementation_id())
-                self.assertTrue((output.parent / 'model=mlp..init_hps=False..deep=4..hyper=0.npy').exists())
+                self.assertFalse((output.parent / 'model=mlp..init_hps=False..deep=4..hyper=0.npy').exists())
             finally:
                 os.chdir(previous)
 

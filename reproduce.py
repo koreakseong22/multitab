@@ -57,6 +57,8 @@ def main():
     parser.add_argument("--models", nargs="+",
                         choices=["randomforest", "xgboost", "catboost", "lightgbm", "mlp", "embedmlp", "mlpplr", "resnet", "ftt", "t2gformer", "saint", "tabr", "modernnca"],
                         default=["randomforest", "xgboost", "catboost", "lightgbm", "mlp", "embedmlp", "mlpplr", "resnet", "ftt", "t2gformer", "saint", "tabr", "modernnca"])
+    parser.add_argument("--mode", choices=["best", "all"], default="all",
+                        help="best reproduces only the tuned single model; all also reproduces initial and ensemble members")
 
     # Parse the arguments
     parser.add_argument("--allow_legacy_logs", action="store_true")
@@ -84,9 +86,14 @@ def main():
             (False, 0, 0), #tuned
             (False, 1, 0), (False, 2, 0), (False, 3, 0), (False, 4, 0), #deep ensemble
             (False, 0, 1), (False, 0, 2), (False, 0, 3), (False, 0, 4)] #hyper ensemble
-    opt_dict = {"lr": [opts[0]], "tabpfn": [opts[0]],
-                "randomforest": opts[:2], "xgboost": opts[:2], "catboost": opts[:2], "lightgbm": opts[:2],
-                "mlp": opts, "embedmlp": opts, "mlpplr": opts, "ftt": opts, "resnet": opts, "t2gformer": opts, "saint": opts, "tabr": opts, "modernnca": opts}
+    selected_opts = [(False, 0, 0)] if args.mode == "best" else opts
+    opt_dict = {"randomforest": selected_opts[:1] if args.mode == "best" else opts[:2],
+                "xgboost": selected_opts[:1] if args.mode == "best" else opts[:2],
+                "catboost": selected_opts[:1] if args.mode == "best" else opts[:2],
+                "lightgbm": selected_opts[:1] if args.mode == "best" else opts[:2],
+                "mlp": selected_opts, "embedmlp": selected_opts, "mlpplr": selected_opts,
+                "ftt": selected_opts, "resnet": selected_opts, "t2gformer": selected_opts,
+                "saint": selected_opts, "tabr": selected_opts, "modernnca": selected_opts}
 
     # Set GPU environment variables
     device = configure_device(args.gpu_id)
