@@ -54,11 +54,20 @@ def main():
     parser.add_argument("--openml_id", type=int, default=10)
     parser.add_argument("--seed", type=int, choices=range(10), default=7)
     parser.add_argument("--savepath", type=str, default=".", help="path to save the results")
+    parser.add_argument("--models", nargs="+",
+                        choices=["randomforest", "xgboost", "catboost", "lightgbm", "mlp", "embedmlp", "mlpplr", "resnet", "ftt", "t2gformer", "saint", "tabr", "modernnca"],
+                        default=["randomforest", "xgboost", "catboost", "lightgbm", "mlp", "embedmlp", "mlpplr", "resnet", "ftt", "t2gformer", "saint", "tabr", "modernnca"])
 
     # Parse the arguments
     parser.add_argument("--allow_legacy_logs", action="store_true")
+    parser.add_argument("--allow_revision_mismatch", action="store_true",
+                        help="allow HPO and existing reproduction logs from an explicitly verified earlier code revision")
     args = parser.parse_args()
     revision = implementation_id()
+
+    def verify_implementation(metadata):
+        if not args.allow_revision_mismatch:
+            check_implementation(metadata, revision, args.allow_legacy_logs)
 
     # Load dataset information from a JSON file
     with open(Path(__file__).resolve().parent / 'dataset_id.json', 'r') as file:
@@ -69,7 +78,7 @@ def main():
     if not os.path.exists(directory):
         os.makedirs(directory)
 
-    models = ["lr", "randomforest", "xgboost", "catboost", "lightgbm", "mlp", "embedmlp", "mlpplr", "resnet", "ftt", "t2gformer", "saint", "tabpfn", "tabr", "modernnca"]
+    models = args.models
     # (init_hp, deepens, hyperens)
     opts = [(True, 0, 0), #no HPO
             (False, 0, 0), #tuned
@@ -97,7 +106,7 @@ def main():
             if not todo:
                 saved = np.load(fname, allow_pickle=True).item()
                 if isinstance(saved, dict):
-                    check_implementation(saved, revision, args.allow_legacy_logs)
+                    verify_implementation(saved)
             print("##########################################")
             print(env_info) 
             print(fname)
@@ -112,7 +121,7 @@ def main():
                     # Load the optimization logs
                     try:
                         opt_logs = joblib.load(os.path.join(args.savepath, f'optim_logs/seed={args.seed}/data={args.openml_id}..model={m}.pkl'))
-                        check_implementation(opt_logs.user_attrs, revision, args.allow_legacy_logs)
+                        verify_implementation(opt_logs.user_attrs)
                         not_complete = is_study_todo(opt_logs, tasktype)
                         if not_complete:
                             print(f"HPO incomplete: {m}")
@@ -169,7 +178,8 @@ def main():
                 preds_test = model.predict(X_test)
                 # For classification tasks with ensemble techniques, we should calculate probability or logits
                 preds_test_prob = model.predict_proba(X_test, logit=True) if tasktype != "regression" else None
-                inference_results = {"Prediction": preds_test, "Probability": preds_test_prob, "time": et - st, "implementation_id": revision}
+                inference_results = {"Prediction": preds_test, "Probability": preds_test_prob, "time": et - st, "implementation_id": revision,
+                                     "hpo_implementation_id": opt_logs.user_attrs.get("implementation_id")}
             
                 if tasktype == "regression":
                     test_metrics = calculate_metric(y_test*y_std, preds_test*y_std, None, tasktype, 'test')
