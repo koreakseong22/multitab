@@ -66,9 +66,9 @@ def main():
     remaining_trials = max(0, 100 - completed_trials_count)
 
     # Main part starts here:
+    env_info = '{0}:{1}'.format(platform.node(), args.gpu_id)
     if train:
         # Set GPU environment variable
-        env_info = '{0}:{1}'.format(platform.node(), args.gpu_id)
         print(env_info, device)
     
         # Load dataset
@@ -128,18 +128,18 @@ def main():
         else:
             study.optimize(objective, n_trials=remaining_trials, callbacks=[stop_when_reached_optimal, lambda study, trial: joblib.dump(study, fname)])
     
-        total_training_time = sum(trial.user_attrs.get('training_time', 0) for trial in study.trials if trial.state == optuna.trial.TrialState.COMPLETE)
-        study.set_user_attr('total_training_time', total_training_time)
-    
-        # Save optimization history
-        print("#############################################")
-        print(env_info)
-        print(study.best_trial.user_attrs)
-        df = study.trials_dataframe()
-        df.to_csv(os.path.join(savepath, f'data={args.openml_id}..model={args.modelname}.csv'), index=False)
-        joblib.dump(study, fname)
-        print(fname)
-        print("#######################################")
+    total_training_time = sum(trial.user_attrs.get('training_time', 0) for trial in study.trials if trial.state == optuna.trial.TrialState.COMPLETE)
+    study.set_user_attr('total_training_time', total_training_time)
+
+    # Save optimization history
+    print("#############################################")
+    print(env_info)
+    print(study.best_trial.user_attrs)
+    df = study.trials_dataframe()
+    df.to_csv(os.path.join(savepath, f'data={args.openml_id}..model={args.modelname}.csv'), index=False)
+    joblib.dump(study, fname)
+    print(fname)
+    print("#######################################")
 
 if __name__ == "__main__":
     main()

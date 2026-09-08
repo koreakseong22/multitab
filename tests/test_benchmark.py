@@ -227,6 +227,11 @@ class BenchmarkTests(unittest.TestCase):
                 self.assertEqual(study.best_value, 1.0)
                 self.assertEqual(len(study.trials), 1)
                 self.assertAlmostEqual(study.best_trial.user_attrs['logloss_val'], -np.log(.9))
+                csv_log = log.with_suffix('.csv')
+                csv_log.unlink()
+                with patch.object(sys, 'argv', argv), patch.object(optimize, 'TabularDataset', side_effect=AssertionError('completed study must not retrain')), patch.object(optimize.json, 'load', return_value=info), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    optimize.main()
+                self.assertTrue(csv_log.exists())
                 argv = ['reproduce.py', '--gpu_id', '-1', '--openml_id', '10', '--seed', '1', '--savepath', directory]
                 with patch.object(sys, 'argv', argv), patch.object(reproduce, 'TabularDataset', return_value=dataset), patch.object(reproduce, 'getmodel', return_value=PerfectClassifier()), patch.object(reproduce.json, 'load', return_value=info), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                     reproduce.main()
