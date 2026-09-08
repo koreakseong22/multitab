@@ -39,7 +39,10 @@ opts = {
 def get_results(result_fname, dataset, tasktype, seed, data_id, model_name, ensemble_type="deep"):
     result_path = os.path.join(basepath, result_fname)
     try:
-        result = pd.read_csv(result_fname, index_col=0)
+        # 저장 경로(result_path)와 동일한 위치에서 읽어야 기존 결과에 누적된다.
+        # (이전 코드는 cwd의 result_fname을 읽어 항상 빈 DataFrame으로 시작
+        #  → 마지막 호출 결과만 CSV에 남는 버그)
+        result = pd.read_csv(result_path, index_col=0)
     except FileNotFoundError:
         result = pd.DataFrame(columns=("data", "task", "model", "seed", "ensemble_deep", "ensemble_hyper", "acc_rmse", "auroc_rmse", "logloss_rmse", "init"))
 
@@ -114,7 +117,11 @@ def get_results(result_fname, dataset, tasktype, seed, data_id, model_name, ense
         
         save_name = f'model={model_name}..init_hps=False..{ensemble_type}={e}.npy'
         np.save(os.path.join(log_dir, save_name), preds)
-        print(f"✅ {model_name} {ensemble_type} Ensemble (n={e}) 완료. Acc: {perf.get('acc_test'):.4f}")
+        # 회귀 태스크에는 acc_test가 없어 None 포맷팅으로 크래시하므로 태스크별 지표 사용
+        if tasktype == "regression":
+            print(f"✅ {model_name} {ensemble_type} Ensemble (n={e}) 완료. RMSE: {perf.get('rmse_test'):.4f}")
+        else:
+            print(f"✅ {model_name} {ensemble_type} Ensemble (n={e}) 완료. Acc: {perf.get('acc_test'):.4f}")
 
         # if ensemble_type == "deep":
         #     if tasktype == "regression":
@@ -156,8 +163,7 @@ def get_results(result_fname, dataset, tasktype, seed, data_id, model_name, ense
         #     preds)
 
 
-torch.cuda.set_device(gpu_id)
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+# (device/set_device는 상단에서 CUDA 가용 여부를 확인하고 이미 설정됨)
 
 
 # with open(f'dataset_id.json', 'r') as file:

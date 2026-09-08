@@ -20,7 +20,7 @@ def get_batch_size(n):
     else:
         return 64
 
-def load_data(openml_id):
+def load_data(openml_id, tasktype=None):
     if openml_id == 999999:
         dataset = sklearn.datasets.fetch_california_housing()
         X = pd.DataFrame(dataset['data'])
@@ -106,9 +106,17 @@ def load_data(openml_id):
     X = X.astype(np.float32)
 
     y = y.values
-    # LabelEncoder 항상 적용 (TabZilla 기준 통일)
-    labelencoder = LabelEncoder()
-    y = labelencoder.fit_transform(y)
+    # 분류 태스크만 LabelEncoder 적용 (TabZilla 기준 통일).
+    # 회귀 타깃에 적용하면 연속값이 0..k-1 순위 코드로 바뀌어 RMSE/R2가 무의미해진다.
+    if tasktype is None:
+        # tasktype을 모르면 공식 구현과 동일하게 dtype 기준으로만 인코딩
+        _y0 = np.asarray(y).ravel()[0]
+        encode_y = isinstance(_y0, (str, bool, np.bool_))
+    else:
+        encode_y = tasktype != "regression"
+    if encode_y:
+        labelencoder = LabelEncoder()
+        y = labelencoder.fit_transform(np.asarray(y).ravel())
 
     print("full data size", X.shape)
     return X, y, cat_cols, cat_cardinality, num_cols
@@ -125,13 +133,19 @@ def split_data(X, y, tasktype, num_indices=[], seed=0, device='cuda'):
     if tasktype == "multiclass":
         y = one_hot(y)
     
-    # StratifiedKFold로 변경 (TabZilla 벤치마크 기준 통일)
-    # 기존 KFold는 클래스 비율을 보존하지 않아 희귀 클래스가 fold에서 누락되면
-    # AUROC가 undefined(nan)가 되는 문제가 있음 (sklearn 공식 문서 권장 방식)
-    from sklearn.model_selection import StratifiedKFold
-    y_for_split = np.argmax(y, axis=1) if y.ndim > 1 else y
-    kf = StratifiedKFold(n_splits=10, shuffle=True, random_state=42)
-    fold_idx = list(kf.split(X, y_for_split))
+    # 분류: StratifiedKFold (TabZilla 벤치마크 기준 통일)
+    #   기존 KFold는 클래스 비율을 보존하지 않아 희귀 클래스가 fold에서 누락되면
+    #   AUROC가 undefined(nan)가 되는 문제가 있음 (sklearn 공식 문서 권장 방식)
+    # 회귀: 연속 타깃은 층화가 불가능하므로 공식 구현과 동일하게 KFold 사용
+    #   (StratifiedKFold에 연속값을 넣으면 클래스당 표본 수 < n_splits 로 ValueError)
+    if tasktype == "regression":
+        kf = KFold(n_splits=10, shuffle=True, random_state=42)
+        fold_idx = list(kf.split(X))
+    else:
+        from sklearn.model_selection import StratifiedKFold
+        y_for_split = np.argmax(y, axis=1) if y.ndim > 1 else y
+        kf = StratifiedKFold(n_splits=10, shuffle=True, random_state=42)
+        fold_idx = list(kf.split(X, y_for_split))
     tr_idx, te_idx = fold_idx[seed]
     val_split_idx = (seed+1) % 10
     _, val_idx = fold_idx[val_split_idx]
@@ -195,7 +209,7 @@ def prep_data(X_train, X_val, X_test, y_train, y_val, y_test, num_indices=[], ta
 class TabularDataset(torch.utils.data.Dataset):
     def __init__(self, openml_id, tasktype, device, seed=1):
         
-        X, y, self.X_cat, self.X_cat_cardinality, self.X_num = load_data(openml_id)
+        X, y, self.X_cat, self.X_cat_cardinality, self.X_num = load_data(openml_id, tasktype=tasktype)
         self.tasktype = tasktype
         
         (self.X_train, self.y_train), (self.X_val, self.y_val), (self.X_test, self.y_test), self.y_std = split_data(X, y, self.tasktype, num_indices=self.X_num, seed=seed, device=device)

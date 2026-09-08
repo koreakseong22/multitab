@@ -329,15 +329,18 @@ class TabRMethod(object, metaclass=abc.ABCMeta):
         self.context_size = 96
 
         m_params = params["model"].copy()
-        
-        n_frequencies = m_params.get('n_frequencies')
-        if n_frequencies is None:
-            n_frequencies = m_params.get('d_embedding', 48)
 
+        # search_space.py / rearrange_params 는 num_embeddings 관련 값을
+        # params["model"]["num_embeddings"] 중첩 dict 로 전달한다.
+        # (이전 코드는 최상위에서 찾다가 전부 miss 하여 항상 하드코딩된
+        #  기본값 48/0.01/128 로 학습되는 버그가 있었다)
+        ne = m_params.get('num_embeddings')
+        if not isinstance(ne, dict):
+            ne = {}
         num_embeddings_params = {
-            'n_frequencies': n_frequencies,
-            'frequency_scale': m_params.get('frequency_scale', 0.01),
-            'd_embedding': m_params.get('d_embedding', 128)
+            'n_frequencies': ne.get('n_frequencies', 48),
+            'frequency_scale': ne.get('frequency_scale', 0.01),
+            'd_embedding': ne.get('d_embedding', 64),
         }
 
         tabr_valid_keys = {
@@ -636,6 +639,11 @@ class TabRMethod(object, metaclass=abc.ABCMeta):
             logits = torch.concatenate(logits, dim=0)
 
         if logit:
+            return logits.detach().cpu().numpy()
+        elif self.is_binclass:
+            # binclass 출력은 1-D logit 벡터: softmax(dim=-1)를 쓰면 표본 축으로
+            # 정규화되어 무의미해진다. eval.py가 prob=False일 때 expit을 1회
+            # 적용하므로 raw logit을 그대로 반환 (supervised.py와 동일 컨벤션)
             return logits.detach().cpu().numpy()
         else:
             return torch.nn.functional.softmax(logits, dim=-1).detach().cpu().numpy()

@@ -78,7 +78,8 @@ class KNN(torch.nn.Module):
                     logits = np.log(probs[:, 1] / (1 - probs[:, 1]))
                     return logits
                 else:  # Multiclass classification
-                    logits = np.log(probs / (1 - probs))
+                    # softmax의 역변환은 log(p) (LR 클래스의 주석 참고)
+                    logits = np.log(probs)
                     return logits
             else:
                 return probs
@@ -111,7 +112,8 @@ class DecisionTree(torch.nn.Module):
                     logits = np.log(probs[:, 1] / (1 - probs[:, 1]))
                     return logits
                 else:  # Multiclass classification
-                    logits = np.log(probs / (1 - probs))
+                    # softmax의 역변환은 log(p) (LR 클래스의 주석 참고)
+                    logits = np.log(probs)
                     return logits
             else:
                 return probs
@@ -145,11 +147,14 @@ class RandomForest(torch.nn.Module):
                 logits = np.log(probs[:, 1] / (1 - probs[:, 1]))
                 return logits
             else:  # Multiclass classification
-                logits = np.log(probs / (1 - probs))
+                # softmax의 역변환은 log(p) (LR 클래스의 주석 참고).
+                # log(p/(1-p))를 쓰면 eval.py의 softmax가 원래 확률을 복원하지
+                # 못하고 과도하게 sharpen 되어 logloss/AUROC가 왜곡된다.
+                logits = np.log(probs)
                 return logits
         else:
             return probs
-    
+
 class CatBoost(torch.nn.Module):
     def __init__(self, params, tasktype, cat_features=[]):
         loss_fn = {"multiclass": "MultiClass", "binclass": "CrossEntropy", "regression": "RMSE"}

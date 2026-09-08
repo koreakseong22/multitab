@@ -539,7 +539,16 @@ class ModernNCAMethod(object, metaclass=abc.ABCMeta):
             logits = torch.concatenate(logits, dim=0)
 
         if logit:
+            # 주의: ModernNCA의 binclass 출력은 raw logit이 아니라 이미 확률이다
+            # (forward가 이웃 label의 softmax 가중 평균을 반환).
+            # reproduce.py/ensemble.py가 이 관행에 맞춰져 있으므로 그대로 반환.
             return logits.detach().cpu().numpy()
+        elif self.is_binclass:
+            # binclass 1-D 출력에 softmax(dim=-1)를 쓰면 표본 축으로 정규화되어
+            # 무의미해진다. eval.py가 prob=False일 때 expit을 1회 적용하므로,
+            # 확률 p를 log-odds로 변환해 반환하면 expit(log-odds) == p 로 복원된다.
+            p = torch.clamp(logits, 1e-7, 1 - 1e-7)
+            return torch.log(p / (1 - p)).detach().cpu().numpy()
         else:
             return torch.nn.functional.softmax(logits, dim=-1).detach().cpu().numpy()
     

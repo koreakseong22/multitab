@@ -413,9 +413,14 @@ class build_t2g(t2gformer):
             {'params': parameters_with_slr, 'lr': self.learning_rate_embed, 'weight_decay': 0.0}
         ]
         
+        # 공식 구현과 동일한 매핑: Adam도 weight_decay를 받고, sgd는 SGD(momentum=0.9)
+        # (이전 코드는 Adam에서 weight_decay가 누락되고 sgd가 Adam으로 둔갑했음)
         if self.optimizer_name == "AdamW":
             return torch.optim.AdamW(parameter_groups, lr=self.learning_rate, weight_decay=self.weight_decay)
-        return torch.optim.Adam(parameter_groups, lr=self.learning_rate)
+        elif self.optimizer_name == "Adam":
+            return torch.optim.Adam(parameter_groups, lr=self.learning_rate, weight_decay=self.weight_decay)
+        else:
+            return torch.optim.SGD(parameter_groups, lr=self.learning_rate, weight_decay=self.weight_decay, momentum=0.9)
                
 class T2GFormer(supmodel):
     def __init__(self, params, tasktype, num_cols=[], cat_features=[], input_dim=0, output_dim=0, device="cuda", data_id=None, modelname="t2g"):

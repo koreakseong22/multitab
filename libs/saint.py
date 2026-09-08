@@ -584,7 +584,9 @@ class main_saint(supmodel):
             if logit:
                 return logits.numpy()
             elif self.tasktype == "binclass":
-                # 원본 버그 수정: binclass는 sigmoid 사용 (softmax 아님)
-                return torch.sigmoid(logits).numpy()
+                # eval.py에서 prob=False(기본값)일 때 expit(sigmoid)를 추가로 적용하므로
+                # 여기서는 raw logit을 그대로 반환 (supervised.py base class와 동일 컨벤션,
+                # sigmoid를 여기서 적용하면 optimize.py 경로에서 이중 적용됨)
+                return logits.numpy()
             else:
                 return torch.nn.functional.softmax(logits, dim=1).numpy()

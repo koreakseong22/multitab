@@ -21,7 +21,6 @@ def get_search_space(trial, modelname, num_features=None, data_id=None, metric=N
             'enable_categorical': trial.suggest_categorical('enable_category', [True, False]),
             'early_stopping_rounds': 20,
             'n_estimators': 10000,
-            'max_iterations': 10000,
             'verbosity': 0
         }
     elif modelname == "catboost":
@@ -44,7 +43,11 @@ def get_search_space(trial, modelname, num_features=None, data_id=None, metric=N
             'feature_fraction': trial.suggest_float('feature_fraction', 0.4, 1),
             'extra_trees': trial.suggest_categorical('extra_trees', [True, False]),
             'early_stopping_rounds': 20,
-            'iterations': 10000,
+            # ⚠ 'iterations'는 LightGBM의 유효한 alias가 아니다 (num_iterations의
+            #   alias 목록: num_iteration, n_iter, num_trees, n_estimators 등).
+            #   'iterations': 10000 으로 넘기면 조용히 무시되어 sklearn 기본값
+            #   100 그루만 학습된다 (공식 MultiTab의 버그). n_estimators로 교체.
+            'n_estimators': 10000,
             'verbosity': -1
         }
     elif modelname == "mlp":
@@ -208,54 +211,21 @@ def get_search_space(trial, modelname, num_features=None, data_id=None, metric=N
                 "predictor_n_blocks": trial.suggest_int('predictor_n_blocks', 1, 2),
                 "dropout0": trial.suggest_float('dropout0', 0.0, 0.6),
                 "d_multiplier": 2.0, "mixer_normalization": "auto", "dropout1": 0.0, "normalization": "LayerNorm", "activation": "ReLU",
-                "feature_interaction" : True,
-                "num_embeddings": {            
+                # 공식 MultiTab과 동일한 num_embeddings 탐색 공간.
+                # (이전 버전: d_embedding 키가 중복되어 리터럴 64가 suggest 값을 덮었고,
+                #  lambda_w/margin/feature_interaction/metric/n_bins 는 TabR 구현에
+                #  존재하지 않는 죽은 파라미터라 TPE 탐색 차원만 낭비했음 → 제거)
+                "num_embeddings": {
                     "d_embedding": trial.suggest_int('d_embedding', 8, 32) if data_id in large_set else trial.suggest_int('d_embedding', 16, 64),
-                    "frequency_scale": trial.suggest_float('frequency_scale', 0.01, 100.0, log=True), 
-                    # "n_frequencies": trial.suggest_int('n_frequencies', 16, 96), # PLREncoding용
-                    "n_bins": 32,
-                    "d_embedding" : 64,
-                }, 
-                # "metric": metric if metric is not None else 'l2'  # 인자로 받은 metric을 그대로 사용하거나, 없으면 기본값 'l2'로 설정
-                "metric" : "l2",  # 'l2', 'l1', 'cosine', 'mahalanobis', 'wasserstein', 'kl'
-                "lambda_w": trial.suggest_float('lambda_w', 0.01, 0.5, log=True),
-                "margin": trial.suggest_float('margin', 0.5, 2.0),
+                    "frequency_scale": trial.suggest_float('frequency_scale', 0.01, 100.0, log=True),
+                    "n_frequencies": trial.suggest_int('n_frequencies', 16, 96),
+                },
             },
             "lr": 1e-4,
             "weight_decay": 1e-5,
             # "weight_decay": trial.suggest_float('weight_decay', 1e-06, 0.001, log=True),
             "early_stopping_rounds": 10,
             'lr_scheduler': True,
-        }
-    elif modelname == "ptarl":
-        # PTaRL: Prototype-based Tabular Representation Learning via Space Calibration
-        # Hangting Ye et al., ICLR 2024 — https://arxiv.org/abs/2407.05364
-        # 원본 코드(HangtingYe/PTaRL: models.py, train_final_version.py) 구조에 충실한 버전.
-        #
-        #   - encoder: vanilla MLP (Linear-ReLU-Dropout) — d_hidden, n_blocks로 d_layers 구성
-        #   - lr: 1e-4 고정 (원본 하드코딩, 탐색하지 않음) → libs/ptarl.py에서 처리
-        #   - n_epochs: early stopping(patience=20)만으로 종료, max_epochs는 안전 상한
-        #   - ot_weight / diversity_weight / r_weight: 원본처럼 3개 독립 가중치
-        #     (원본 default=0.25, 여기서는 Optuna로 각각 탐색)
-        #   - n_clusters = ceil(log2(n_num+n_cat)) — libs/ptarl.py에서 자동 계산 (탐색 X)
-        large_set = [
-            44059, 44131, 40685, 45548, 41169, 41162, 42345, 41168, 40922, 23512, 40672,
-            44161, 41150, 1509, 44057, 43928, 44069, 1503, 44068, 44159, 1113, 44027,
-            1169, 150, 44065, 44129, 1567,
-        ]
-        params = {
-            "d_hidden":         trial.suggest_categorical('d_hidden', [64, 128])
-                                if data_id in large_set
-                                else trial.suggest_categorical('d_hidden', [64, 128, 256]),
-            "n_blocks":         trial.suggest_int('n_blocks', 1, 4),
-            "dropout":          trial.suggest_float('dropout', 0.0, 0.5, step=0.05),
-            "ot_weight":        trial.suggest_float('ot_weight', 0.05, 1.0, log=True),
-            "diversity_weight": trial.suggest_float('diversity_weight', 0.05, 1.0, log=True),
-            "r_weight":         trial.suggest_float('r_weight', 0.05, 1.0, log=True),
-            "weight_decay":     trial.suggest_float('weight_decay', 1e-6, 1e-3, log=True),
-            "max_epochs":            50,   # Stage1(≤50) + Stage2(≤50) = ≤100 epoch 합산
-                                          # → 다른 baseline(mlp/ftt/resnet 등, n_epochs=100)과 동일한 학습 budget
-            "early_stopping_rounds": 20,  # 원본 고정값 (patience=20)
         }
     elif modelname == "tabm":
         # TabM: Advancing Tabular Deep Learning With Parameter-Efficient Ensembling
@@ -308,7 +278,12 @@ def add_default_params(modelname, params, data_id):
                       early_stopping_rounds(10) / lr_scheduler
         modernnca     model 중첩 구조 전체 + early_stopping_rounds(20)
                       (두 모델은 rearrange_params 가 처리한다)
-        xgboost       max_iterations (무해)
+
+    [2026-09 감사] 추가 수정:
+        lightgbm      'iterations'는 유효 alias가 아니어서 무시됨 → n_estimators
+        xgboost       optuna 이름 'enable_category' → 생성자 키워드
+                      'enable_categorical' 번역 (reproduce 시 탐색값 유실 방지),
+                      죽은 키 max_iterations 제거
     """
     if modelname == "randomforest":
         params.update({'n_estimators': 300})
@@ -316,10 +291,15 @@ def add_default_params(modelname, params, data_id):
     elif modelname == "xgboost":
         params.update({
             'n_estimators': 10000,
-            'max_iterations': 10000,
             'early_stopping_rounds': 20,
             'verbosity': 0,
         })
+        # ⚠ optuna 파라미터 이름은 'enable_category'인데 XGBoost 생성자 키워드는
+        #   'enable_categorical'이다. best_params 에는 전자로 남으므로 여기서
+        #   번역해 주지 않으면 reproduce 시 탐색된 값이 조용히 버려지고
+        #   기본값(False)으로 학습된다.
+        if 'enable_category' in params:
+            params['enable_categorical'] = params.pop('enable_category')
 
     elif modelname == "catboost":
         params.update({
@@ -329,8 +309,10 @@ def add_default_params(modelname, params, data_id):
         })
 
     elif modelname == "lightgbm":
+        # 'iterations'는 LightGBM 유효 alias가 아니라 무시된다 → n_estimators 사용
+        # (get_search_space 쪽 주석 참고)
         params.update({
-            'iterations': 10000,
+            'n_estimators': 10000,
             'early_stopping_rounds': 20,
             'verbosity': -1,
         })
@@ -353,7 +335,7 @@ def add_default_params(modelname, params, data_id):
         #   get_search_space 기준으로 tabr 은 10, modernnca 는 20 이다.
         pass
 
-    elif modelname in ["ptarl", "tabm"]:
+    elif modelname == "tabm":
         # rearrange_params 가 처리한다
         pass
 
@@ -413,7 +395,7 @@ def rearrange_params(modelname, data_id, params):
         #   weight_decay / lr_scheduler 를 탐색하므로 남는다.
         _MODEL_KEYS = {
             "tabr":      ("d_main", "context_dropout", "encoder_n_blocks",
-                          "predictor_n_blocks", "dropout0", "lambda_w", "margin"),
+                          "predictor_n_blocks", "dropout0"),
             "modernnca": ("d_block", "dim", "dropout", "n_blocks"),
         }[modelname]
         _EMB_KEYS = ("d_embedding", "frequency_scale", "n_frequencies")
@@ -433,18 +415,16 @@ def rearrange_params(modelname, data_id, params):
                 ne[k] = params.pop(k)
 
         if modelname == "tabr":
-            # get_search_space 의 num_embeddings 블록: d_embedding 이 두 번
-            # 나오는데 뒤의 리터럴 64 가 앞의 suggest 결과를 덮는다. 실제로
-            # 학습에 쓰인 값은 64 이므로 그것을 따른다.
-            ne["d_embedding"] = 64
-            ne.setdefault("n_bins", 32)
+            # suggest 된 d_embedding / frequency_scale / n_frequencies 는 위의
+            # _EMB_KEYS 루프에서 중첩 구조로 복원된다. (과거 버전은 d_embedding
+            # 을 64로 강제 덮어썼으나, 탐색 공간의 중복 키 버그가 수정되어
+            # 더 이상 필요 없음. 다만 옛 로그에는 n_frequencies 가 없을 수
+            # 있으므로 tabr.py 쪽 기본값 48이 폴백으로 사용된다.)
             mp.setdefault("d_multiplier", 2.0)
             mp.setdefault("mixer_normalization", "auto")
             mp.setdefault("dropout1", 0.0)
             mp.setdefault("normalization", "LayerNorm")
             mp.setdefault("activation", "ReLU")
-            mp.setdefault("feature_interaction", True)
-            mp.setdefault("metric", "l2")
             # 최상위 리터럴 (best_params 에 없음)
             params.setdefault("lr", 1e-4)
             params.setdefault("weight_decay", 1e-5)
@@ -458,24 +438,7 @@ def rearrange_params(modelname, data_id, params):
         mp["num_embeddings"] = ne
         params["model"] = mp
 
-    # 4. PTaRL 보정
-    elif modelname == "ptarl":
-        large_set = [
-            44059, 44131, 40685, 45548, 41169, 41162, 42345, 41168, 40922, 23512, 40672,
-            44161, 41150, 1509, 44057, 43928, 44069, 1503, 44068, 44159, 1113, 44027,
-            1169, 150, 44065, 44129, 1567,
-        ]
-        params.setdefault("d_hidden",  128)
-        params.setdefault("n_blocks",  1)
-        params.setdefault("dropout",   0.1)
-        params.setdefault("ot_weight",        0.25)  # 원본 default
-        params.setdefault("diversity_weight", 0.25)  # 원본 default
-        params.setdefault("r_weight",         0.25)  # 원본 default
-        params.setdefault("weight_decay", 1e-5)
-        params.setdefault("max_epochs", 50)
-        params.setdefault("early_stopping_rounds", 20)
-
-    # 5. TabM 보정
+    # 4. TabM 보정
     elif modelname == "tabm":
         params.setdefault("k",                     32)
         params.setdefault("n_epochs",              100)
@@ -501,16 +464,6 @@ def suggest_initial_trial(modelname):
         "saint": {"learning_rate": 0.0001, "weight_decay" : 0.01, "activation": "relu", "optimizer": "AdamW", "attn_dropout": 0.1, "ff_dropout": 0.8}, #SAINT
         "modernnca": {"n_blocks": 0, "weight_decay": 0.0002, "lr": 0.01},
         "tabr": {"d_main": 265, "encoder_n_blocks": 0, "predictor_n_blocks": 1},
-        # PTaRL 원본 default (train_final_version.py 의 CLI default 와 동일: 모두 0.25)
-        "ptarl": {
-            "d_hidden":         128,
-            "n_blocks":         1,
-            "dropout":          0.1,
-            "ot_weight":        0.25,
-            "diversity_weight": 0.25,
-            "r_weight":         0.25,
-            "weight_decay":     1e-5,
-        },
         # TabM 논문 README default (lr=2e-3, weight_decay=3e-4, k=32)
         "tabm": {
             "k":                     32,
