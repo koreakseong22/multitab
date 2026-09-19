@@ -16,7 +16,7 @@ import optuna
 import pandas as pd
 import torch
 from scipy.special import expit, softmax
-from sklearn.metrics import log_loss
+from sklearn.metrics import log_loss, roc_auc_score
 from sklearn.model_selection import KFold
 
 from libs.data import load_data, split_data
@@ -161,6 +161,58 @@ class BenchmarkTests(unittest.TestCase):
         self.assertIsNone(calculate_multi_auroc(np.pad(y, ((0, 0), (0, 1))), np.pad(p, ((0, 0), (0, 1)))))
         binary = calculate_metric(np.array([0, 1]), np.array([[0], [1]]), np.array([[.8, .2], [.1, .9]]), 'binclass', 'test', prob=True)
         self.assertAlmostEqual(binary['logloss_test'], log_loss([0, 1], [.2, .9]))
+
+    def test_official_multitab_auroc_from_logits(self):
+        binary_y = np.array([0, 0, 1, 1])
+        binary_logits = np.array([-2.0, 0.5, -0.25, 2.0])
+        binary_pred = (binary_logits >= 0).astype(int)
+        binary = calculate_metric(
+            binary_y, binary_pred, binary_logits, 'binclass', 'test'
+        )
+        self.assertAlmostEqual(
+            binary['auroc_test'],
+            roc_auc_score(binary_y, expit(binary_logits)),
+        )
+
+        multiclass_labels = np.array([0, 1, 2, 0, 1, 2])
+        multiclass_y = np.eye(3)[multiclass_labels]
+        multiclass_logits = np.array([
+            [3.0, 1.0, -1.0],
+            [0.0, 2.0, 1.0],
+            [-1.0, 0.5, 2.0],
+            [1.5, 1.0, 0.0],
+            [0.5, 1.5, 0.0],
+            [0.0, 1.0, 1.5],
+        ])
+        multiclass_prob = softmax(multiclass_logits, axis=1)
+        multiclass = calculate_metric(
+            multiclass_y,
+            multiclass_logits.argmax(axis=1),
+            multiclass_logits,
+            'multiclass',
+            'test',
+        )
+        self.assertAlmostEqual(
+            multiclass['auroc_test'],
+            roc_auc_score(
+                multiclass_y,
+                multiclass_prob,
+                average='macro',
+                multi_class='ovr',
+            ),
+        )
+
+        multiclass_from_prob = calculate_metric(
+            multiclass_y,
+            multiclass_logits.argmax(axis=1),
+            multiclass_prob,
+            'multiclass',
+            'test',
+            prob=True,
+        )
+        self.assertAlmostEqual(
+            multiclass['auroc_test'], multiclass_from_prob['auroc_test']
+        )
 
     def test_binary_numeric_labels(self):
         X = np.ones((100, 2), dtype=np.float32)
