@@ -52,6 +52,9 @@ def parser():
     p.add_argument("--warmup", type=int, default=20)
     p.add_argument("--full_pass_repeats", type=int, default=20)
     p.add_argument("--split", choices=["test", "val"], default="test")
+    p.add_argument("--tile", action="store_true",
+                   help="repeat rows so every dataset is timed at the requested batch size even when "
+                        "its split is smaller; needed for a samples/s comparison across datasets")
     p.add_argument("--threads", type=int, default=None)
     p.add_argument("--overwrite", action="store_true")
     return p
@@ -130,7 +133,8 @@ def run(args):
     resident = protocol.resident_memory_mb(device)
     timing = protocol.run_protocol({"prediction": forward}, X, args.batch_sizes, args.repeats,
                                    args.warmup, full_pass_batch=max(args.batch_sizes),
-                                   full_pass_repeats=args.full_pass_repeats, seed=args.seed)
+                                   full_pass_repeats=args.full_pass_repeats, seed=args.seed,
+                                   tile=args.tile)
     api = protocol.time_full_pass(lambda xb: method.predict_proba(xb, logit=True), X,
                                   batch_size=len(X), repeats=args.full_pass_repeats)
     timing["api_predict_proba"] = {"full_pass": api,
@@ -148,10 +152,11 @@ def run(args):
         "fit_s_not_protocol": fit_s,
         "protocol": {"batch_sizes": args.batch_sizes, "repeats": args.repeats, "warmup": args.warmup,
                      "full_pass_repeats": args.full_pass_repeats, "module": str(protocol_path),
+                     "tile": args.tile,
                      "excluded": ["data loading", "input host->device copy", "model construction",
                                   "training", "candidate encoding", "index construction"]},
         "resident_mb_after_setup": resident,
-        "environment": protocol.environment(device),
+        "environment": dict(protocol.environment(device), physical_gpu_id=args.gpu_id),
         "timing": timing,
     }
     out_path.write_text(json.dumps(payload, indent=2, default=float), encoding="utf-8")
